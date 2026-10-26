@@ -1,6 +1,6 @@
 # Plan: WASI 0.3 and Component Model Support for Web Image
 
-Status: in progress, last updated 2026-10-26 (Phases 0 to 5 done except cancellation, error-context, host-side tests of stream and resource exports, and CI; Phase 6 open).
+Status: in progress, last updated 2026-10-26 (Phases 0 to 5 done; CI artifacts still need uploading; Phase 6 open).
 This document records the plan for teaching the Native Image WebAssembly backend (Web Image) to produce a WebAssembly component that targets WASI 0.3 (also known as WASI Preview 3, or "p3") and to generate bindings for custom WebAssembly Interface Type (WIT) interfaces, including `async` functions, `stream<T>`, and `future<T>`.
 
 ## Goals
@@ -209,8 +209,8 @@ Java has no language-level async, and the single-threaded Wasm backends cannot s
   Otherwise the binding registers the pending waitables in a `waitable-set` and returns `WAIT`.
   The generated `callback` export dispatches the event to a Java scheduler (`WitTaskScheduler`) that completes the corresponding `WitFuture`, runs continuations, and returns the next code.
 - **Streams and futures**: `stream<T>` maps to `WitReadableStream<T>` and `WitWritableStream<T>` with both blocking (`read(T[])`) and async (`readAsync` returning `WitFuture`) methods on top of `stream.read`/`stream.write`; `future<T>` maps to `WitFuture<T>` plus `WitFutureWriter<T>`.
-- **error-context**: expose as a Java exception type carrying the debug message.
-- **Cancellation**: support `task.cancel` and `subtask.cancel` through `WitFuture.cancel()`.
+- **error-context**: not needed for WASI 0.3 (gated feature); skipped.
+- **Cancellation**: support `task.cancel` and `subtask.cancel` through `WitFuture.cancel()` (done).
 - Provide an optional blocking bridge: a `WitFuture.join()` that uses `waitable-set.wait` and is only legal from a synchronously lifted export (checked at run time).
 
 Deliverable: an async echo and a streaming example (for example a `wasi:http/proxy` handler) validated with Wasmtime's `component-model-async` enabled.
@@ -231,7 +231,16 @@ Status (2026-10-26), step 2 done: `stream<T>` and `future<T>` values.
 - Verified (`streamtest/`): `main` reads all of stdin through the generated `Stdin.readViaStream()` (a `tuple<stream<u8>, future<result<_, error-code>>>`) and writes through `Stdout.writeViaStream` with a Java-created stream, awaiting both futures; the generated bindings of all WASI 0.3 interfaces compile without skips. Exports with stream parameters or results (`numbers`, `total`) build but cannot be invoked from the Wasmtime CLI, whose value syntax has no streams; a host-side test (Rust or another component) is still to do.
 - Generated adapters print uncaught exceptions of exports to stderr before the trap (`reportUncaught`).
 - Host-side tests: `jco` 1.39 cannot translate WASI 0.3 components yet ("failed to translate component"), and the Wasmtime CLI cannot pass streams or resources, so stream and resource exports need a host that embeds Wasmtime (a small Rust program with the `wasmtime` crate) or a later `jco`.
-- Still open in Phase 5: cancellation (`subtask.cancel`, `TASK_CANCELLED`) and `error-context`.
+- Still open in Phase 5: none (see step 3 below).
+
+Status (2026-10-26), step 3 done: cancellation, resource handle semantics, and component-to-component tests.
+
+- Composition replaces the missing host: two components built with `--tool:svm-wasi` (scratchpad `linktest/`, worlds `test:link/provider` and `test:link/client`) are linked with `wac plug client.wasm --plug provider.wasm -o linked.wasm` (the deprecated `wasm-tools compose` gives the same result) and run with `wasmtime run`. The client exercises exported and imported resources (constructor, methods, static function with `borrow`, `list<counter>`, `list<borrow<counter>>`, owned parameter, `close()`), async exports returning a stream (`numbers`), taking a stream (`total`), and both (`shout`, pumped 8 bytes at a time), plus cancellation.
+- Own and borrow handles follow the spec: `lower_own` always creates a handle in the callee's table, so an exported function receiving an owned resource takes its `rep` and drops the handle (`takeOwn`); borrows passed into the implementing component arrive as the `rep` itself. Imported resources passed by value to the host must be given up with `transfer()`.
+- Scheduler rework found by the composition test: every callback-lifted task now has its own waitable set, so the host resumes the task that owns an operation; a task stays alive (`WAIT`) after `task.return` while handlers it registered are pending (a returned stream is still being written), and exits only when none remain. `beginTask()` runs before the Java implementation so that the operations it starts are attributed to the task. Read handlers are one-shot (the old `return readEnded` re-registered a stale handler over the next read's handler on the same handle index). A consumed waitable leaves its set before the handler runs, because dropping the peer end of a stream notifies the other end even without a pending copy (`End.drop` in the Canonical ABI) and that event would otherwise reach a waitable without a handler.
+- Cancellation: `WitFuture.cancel()` on the future of an async import un-joins the subtask from its set (a waitable in a set cannot be used synchronously), calls the synchronous `subtask.cancel`, and drops the subtask; the callee receives `TASK_CANCELLED` in its callback, cancels its Java future, forgets the handlers it owns (their waitables leave the task's set, which must be empty to be dropped), and acknowledges with `task.cancel` (imported per exported interface as `[task-cancel]`). Pending stream operations of a cancelled export stay pending on their handles; `stream.cancel-read`/`cancel-write` are not wrapped yet. Verified: cancelling a `total` call that never receives data.
+- `error-context` is a gated (📝) feature of the Component Model that WASI 0.3 does not use; it is not implemented.
+- Generated callbacks report uncaught exceptions to stderr before the trap, like the main export adapters.
 
 Design notes (2026-10-26), refined from what Phases 1 to 4 established:
 

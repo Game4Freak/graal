@@ -404,7 +404,7 @@ public final class WitBindgen {
         w.addImport("org.graalvm.webimage.api.wit.WitElementCodec");
         w.line("/** WIT resource " + def.name + " of " + module + ". Generated, do not edit. */");
         w.open("public final class " + name + " implements AutoCloseable");
-        w.line("private final int handle;");
+        w.line("private int handle;");
         w.line();
         w.open("public " + name + "(int handle)");
         w.line("this.handle = handle;");
@@ -417,9 +417,22 @@ public final class WitBindgen {
         w.line("@WitImport(module = \"" + module + "\", name = \"[resource-drop]" + def.name + "\")");
         w.line("private static native void drop(int handle);");
         w.line();
+        w.line("/** Gives up ownership of the handle (used when passing the resource to the host). */");
+        w.open("public int transfer()");
+        w.open("if (handle < 0)");
+        w.line("throw new IllegalStateException(\"The resource was already transferred or closed\");");
+        w.close();
+        w.line("int h = handle;");
+        w.line("handle = -1;");
+        w.line("return h;");
+        w.close();
+        w.line();
         w.line("@Override");
         w.open("public void close()");
+        w.open("if (handle >= 0)");
         w.line("drop(handle);");
+        w.line("handle = -1;");
+        w.close();
         w.close();
         w.line();
         for (Function f : owner.functions.values()) {
@@ -1077,9 +1090,16 @@ public final class WitBindgen {
         w.line("return " + prefix + "new(rep);");
         w.close();
         w.line();
-        w.line("/** The object behind a handle (own or borrow). */");
-        w.open("static " + name + " fromHandle" + name + "(int handle)");
-        w.line("return " + table + ".get(" + prefix + "rep(handle) - 1);");
+        w.line("/** The object behind a borrowed parameter; the implementing component receives the representation directly. */");
+        w.open("static " + name + " fromHandle" + name + "(int rep)");
+        w.line("return " + table + ".get(rep - 1);");
+        w.close();
+        w.line();
+        w.line("/** The object behind an owned parameter: the host adds a handle to this component's table, which is dropped (running the destructor). */");
+        w.open("static " + name + " takeOwn" + name + "(int handle)");
+        w.line(name + " object = " + table + ".get(" + prefix + "rep(handle) - 1);");
+        w.line(prefix + "drop(handle);");
+        w.line("return object;");
         w.close();
         w.line();
         w.line("@WitExport(\"" + exportPrefix + "[dtor]" + def.name + "\")");
@@ -1090,7 +1110,15 @@ public final class WitBindgen {
         w.line();
     }
 
+    /** The adapter class currently being generated. */
+    private String currentAdapterClass;
+
+    private String className(@SuppressWarnings("unused") JavaWriter w) {
+        return currentAdapterClass;
+    }
+
     private void emitExportAdapter(JavaWriter w, String className, String implType, Iterable<Function> functions, String exportPrefix, String taskReturnModule) {
+        currentAdapterClass = className;
         w.addImport("org.graalvm.webimage.api.wit.WitArena");
         w.addImport("org.graalvm.webimage.api.wit.WitExport");
         w.addImport("org.graalvm.webimage.api.wit.WitFuture");
@@ -1113,6 +1141,9 @@ public final class WitBindgen {
         w.open("public static void setImplementation(" + implType + " impl)");
         w.line("implementation = impl;");
         w.close();
+        w.line();
+        w.line("@WitImport(module = \"" + taskReturnModule + "\", name = \"[task-cancel]\")");
+        w.line("private static native void taskCancel();");
         w.line();
         w.line("/** Uncaught exceptions trap the component; report them first so that the cause is visible. */");
         w.open("private static void reportUncaught(String export, Throwable t)");
@@ -1200,6 +1231,7 @@ public final class WitBindgen {
         w.line("@WitExport(\"[async-lift]" + exportName + "\")");
         w.open("public static int " + javaName + "(" + nparams + ")");
         w.line("WitMemory.ensureInitialized();");
+        w.line("int slot = WitScheduler.beginTask();");
         w.line("WitArena.push();");
         w.line("WitFuture<" + boxedResult + "> future;");
         w.open("try");
@@ -1235,7 +1267,7 @@ public final class WitBindgen {
         w.open("} finally");
         w.line("WitArena.pop();");
         w.close();
-        w.open("return WitScheduler.startTask(future, result ->");
+        w.open("return WitScheduler.startTask(slot, future, result ->");
         w.line("WitArena.push();");
         w.open("try");
         if (f.result == null) {
@@ -1262,7 +1294,12 @@ public final class WitBindgen {
         w.line();
         w.line("@WitExport(\"[callback][async-lift]" + exportName + "\")");
         w.open("public static int " + javaName + "$callback(int event, int waitable, int payload)");
-        w.line("return WitScheduler.callback(event, waitable, payload);");
+        w.open("try");
+        w.line("return WitScheduler.callback(event, waitable, payload, " + className(w) + "::taskCancel);");
+        w.open("} catch (Throwable t)");
+        w.line("reportUncaught(\"" + exportName + "\", t);");
+        w.line("throw t;");
+        w.close();
         w.close();
         w.line();
         StringBuilder rparams = new StringBuilder();

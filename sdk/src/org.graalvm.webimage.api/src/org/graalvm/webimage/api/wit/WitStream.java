@@ -151,8 +151,15 @@ public final class WitStream<T> {
         int payload = ops.read(readable, buffer, max);
         if (payload == WitScheduler.BLOCKED) {
             WitScheduler.register(readable, (code, eventPayload) -> {
+                /*
+                 * Every event finishes this read; the continuation may already have issued the
+                 * next read on the same handle, so the handler must report itself as finished.
+                 */
                 finishRead(future, buffer, eventPayload);
-                return readEnded;
+                if (readEnded) {
+                    closeReadable();
+                }
+                return true;
             });
         } else {
             finishRead(future, buffer, payload);
@@ -185,7 +192,10 @@ public final class WitStream<T> {
         if (payload == WitScheduler.BLOCKED) {
             WitScheduler.register(readable, (code, eventPayload) -> {
                 finishReadBytes(future, buffer, eventPayload);
-                return readEnded;
+                if (readEnded) {
+                    closeReadable();
+                }
+                return true;
             });
         } else {
             finishReadBytes(future, buffer, payload);

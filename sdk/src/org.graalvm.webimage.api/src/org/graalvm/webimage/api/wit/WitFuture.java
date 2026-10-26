@@ -87,6 +87,43 @@ public final class WitFuture<T> {
     private T value;
     private Throwable failure;
     private List<BiConsumer<? super T, ? super Throwable>> continuations;
+    private Runnable canceller;
+
+    /**
+     * Thrown as the failure of a cancelled future.
+     */
+    public static final class CancelledException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        public CancelledException() {
+            super("The asynchronous operation was cancelled");
+        }
+    }
+
+    /**
+     * Registers the action that cancels the pending host operation (used by the scheduler).
+     */
+    public void setCanceller(Runnable action) {
+        this.canceller = action;
+    }
+
+    /**
+     * Cancels the pending host operation, if any, and fails the future with a
+     * {@link CancelledException}.
+     *
+     * @return false if the future was already complete
+     */
+    public boolean cancel() {
+        if (done) {
+            return false;
+        }
+        Runnable action = canceller;
+        canceller = null;
+        if (action != null) {
+            action.run();
+        }
+        return completeExceptionally(new CancelledException());
+    }
 
     public WitFuture() {
     }

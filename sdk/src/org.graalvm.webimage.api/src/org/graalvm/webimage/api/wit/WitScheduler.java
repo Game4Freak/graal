@@ -65,6 +65,7 @@ package org.graalvm.webimage.api.wit;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -73,11 +74,15 @@ import java.util.function.IntFunction;
 /**
  * Drives asynchronous Component Model operations for the single-threaded runtime.
  * <p>
- * All asynchronous waitables (subtasks, stream and future ends) are joined into one waitable set.
+ * Asynchronous waitables (subtasks, stream and future ends) are joined into the waitable set of
+ * the context that started them: code outside a callback-lifted task shares one set, and each
+ * callback-lifted task has its own, so that the host resumes the task an event belongs to.
  * {@link #blockOn(WitFuture)} waits for host events with {@code waitable-set.wait} and dispatches
  * them to the registered handlers, which complete the corresponding {@link WitFuture}s.
- * Asynchronous exports lifted with a callback use {@link #startTask} and {@link #callback}
- * instead, which never block: the host calls the callback export whenever an event is delivered.
+ * Asynchronous exports lifted with a callback use {@link #beginTask}, {@link #startTask}, and
+ * {@link #callback} instead, which never block: the host calls the callback export whenever an
+ * event is delivered, and the task exits once its result is returned and no operation it started
+ * is pending.
  * <p>
  * Only functional in an image compiled for the WASI target.
  *
@@ -119,11 +124,18 @@ public final class WitScheduler {
     @WitImport(module = "$root", name = "[waitable-set-poll]")
     private static native int waitableSetPoll(int set, int eventPtr);
 
+    @WitImport(module = "$root", name = "[waitable-set-drop]")
+    private static native void waitableSetDrop(int set);
+
     @WitImport(module = "$root", name = "[waitable-join]")
     private static native void waitableJoin(int waitable, int set);
 
     @WitImport(module = "$root", name = "[subtask-drop]")
     private static native void subtaskDrop(int subtask);
+
+    /** Synchronous {@code subtask.cancel}: blocks until the subtask is cancelled or returned. */
+    @WitImport(module = "$root", name = "[subtask-cancel]")
+    private static native int subtaskCancel(int subtask);
 
     @WitImport(module = "$root", name = "[context-get-0]")
     private static native int contextGet();
@@ -143,24 +155,68 @@ public final class WitScheduler {
         boolean onEvent(int code, int payload);
     }
 
-    private static int set = -1;
+    /** The waitable set of code running outside a callback-lifted task. */
+    private static int rootSet = -1;
     private static int eventBuffer;
     private static final Map<Integer, EventHandler> HANDLERS = new HashMap<>();
+    /** The task slot that registered each pending handler (-1 for code outside a task). */
+    private static final Map<Integer, Integer> HANDLER_TASKS = new HashMap<>();
+    /** The callback-lifted task whose code is running, or -1. */
+    private static int currentTask = -1;
 
-    private static int set() {
-        if (set < 0) {
-            set = waitableSetNew();
+    private static int eventBuffer() {
+        if (eventBuffer == 0) {
             eventBuffer = WitMemory.allocate(2 * Integer.BYTES, 4);
         }
-        return set;
+        return eventBuffer;
     }
 
     /**
-     * Joins the waitable into the scheduler's set and registers its handler.
+     * The waitable set of the current context: each callback-lifted task waits on its own set so
+     * that the host resumes the task that owns the operation an event belongs to.
+     */
+    private static int currentSet() {
+        if (currentTask < 0) {
+            if (rootSet < 0) {
+                rootSet = waitableSetNew();
+            }
+            return rootSet;
+        }
+        return TASKS.get(currentTask).set();
+    }
+
+    /**
+     * Forgets the handlers of a cancelled task and takes their waitables out of its set (which
+     * must be empty to be dropped). The host operations themselves stay pending on their handles.
+     */
+    private static void abandonWork(int slot) {
+        Iterator<Map.Entry<Integer, Integer>> it = HANDLER_TASKS.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Integer, Integer> entry = it.next();
+            if (entry.getValue() == slot) {
+                waitableJoin(entry.getKey(), 0);
+                HANDLERS.remove(entry.getKey());
+                it.remove();
+            }
+        }
+    }
+
+    private static boolean hasPendingWork(int slot) {
+        for (int owner : HANDLER_TASKS.values()) {
+            if (owner == slot) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Joins the waitable into the set of the current context and registers its handler.
      */
     public static void register(int waitable, EventHandler handler) {
         HANDLERS.put(waitable, handler);
-        waitableJoin(waitable, set());
+        HANDLER_TASKS.put(waitable, currentTask);
+        waitableJoin(waitable, currentSet());
     }
 
     /**
@@ -173,16 +229,30 @@ public final class WitScheduler {
             return false;
         }
         EventHandler handler = HANDLERS.remove(waitable);
+        Integer owner = HANDLER_TASKS.remove(waitable);
         if (handler == null) {
             throw new IllegalStateException("No handler for waitable " + waitable + " (event " + code + ")");
         }
         /*
-         * A finished handler drops its waitable (which also leaves the set) and the host may reuse
-         * the index for a waitable registered by a continuation, so the entry is removed before the
-         * handler runs and only put back if the waitable is still pending.
+         * The waitable leaves the set before the handler runs: a stream end whose peer is dropped
+         * later gets a DROPPED notification even without a pending copy, which must not reach a
+         * handler-less waitable. A finished handler may drop its waitable and the host may reuse
+         * the index for a waitable registered by a continuation, so the entry is removed before
+         * the handler runs and only put back (and joined again) if the waitable is still pending
+         * and no continuation registered a new handler for the index. The continuation runs in
+         * the context of the owning task so that operations it starts belong to that task.
          */
-        if (!handler.onEvent(code, payload)) {
-            HANDLERS.put(waitable, handler);
+        waitableJoin(waitable, 0);
+        int previous = currentTask;
+        currentTask = owner == null ? -1 : owner;
+        try {
+            if (!handler.onEvent(code, payload) && !HANDLERS.containsKey(waitable)) {
+                HANDLERS.put(waitable, handler);
+                HANDLER_TASKS.put(waitable, currentTask);
+                waitableJoin(waitable, currentSet());
+            }
+        } finally {
+            currentTask = previous;
         }
         return true;
     }
@@ -192,11 +262,12 @@ public final class WitScheduler {
      */
     public static void blockOn(WitFuture<?> future) {
         while (!future.isDone()) {
-            if (HANDLERS.isEmpty()) {
+            if (!hasPendingWork(currentTask)) {
                 throw new IllegalStateException("Waiting for a future that no pending host operation can complete");
             }
-            int code = waitableSetWait(set(), eventBuffer);
-            dispatch(code, WitMemory.readInt(eventBuffer), WitMemory.readInt(eventBuffer + Integer.BYTES));
+            int buffer = eventBuffer();
+            int code = waitableSetWait(currentSet(), buffer);
+            dispatch(code, WitMemory.readInt(buffer), WitMemory.readInt(buffer + Integer.BYTES));
         }
     }
 
@@ -204,11 +275,12 @@ public final class WitScheduler {
      * Dispatches already delivered events without blocking.
      */
     public static void poll() {
-        if (HANDLERS.isEmpty()) {
+        if (!hasPendingWork(currentTask)) {
             return;
         }
-        int code = waitableSetPoll(set(), eventBuffer);
-        dispatch(code, WitMemory.readInt(eventBuffer), WitMemory.readInt(eventBuffer + Integer.BYTES));
+        int buffer = eventBuffer();
+        int code = waitableSetPoll(currentSet(), buffer);
+        dispatch(code, WitMemory.readInt(buffer), WitMemory.readInt(buffer + Integer.BYTES));
     }
 
     // Subtasks (asynchronously lowered imports)
@@ -232,6 +304,20 @@ public final class WitScheduler {
             completeFromResult(future, resultAddress, lifter);
             return future;
         }
+        future.setCanceller(() -> {
+            // Blocks until the callee acknowledged; afterwards the subtask is finished either way
+            // If the result arrived before the cancellation took effect, it is dropped with the memory
+            HANDLERS.remove(handle);
+            HANDLER_TASKS.remove(handle);
+            // A waitable in a set cannot be used synchronously
+            waitableJoin(handle, 0);
+            subtaskCancel(handle);
+            WitArena.freeAll(parameterMemory);
+            if (resultAddress != 0) {
+                WitMemory.free(resultAddress);
+            }
+            subtaskDrop(handle);
+        });
         register(handle, (code, payload) -> {
             if (code != EVENT_SUBTASK) {
                 throw new IllegalStateException("Unexpected event " + code + " for subtask " + handle);
@@ -273,41 +359,63 @@ public final class WitScheduler {
     // Tasks (callback-lifted exports)
 
     private static final class Task<T> {
-        final WitFuture<T> future;
-        final Consumer<T> returner;
+        WitFuture<T> future;
+        Consumer<T> returner;
+        /** Whether the result was passed to {@code task.return}. */
+        boolean returned;
+        private int waitableSet = -1;
 
-        Task(WitFuture<T> future, Consumer<T> returner) {
-            this.future = future;
-            this.returner = returner;
+        int set() {
+            if (waitableSet < 0) {
+                waitableSet = waitableSetNew();
+            }
+            return waitableSet;
+        }
+
+        void dropSet() {
+            if (waitableSet >= 0) {
+                waitableSetDrop(waitableSet);
+                waitableSet = -1;
+            }
         }
 
         boolean finishIfDone() {
-            if (!future.isDone()) {
+            if (returned) {
+                return true;
+            }
+            if (future == null || !future.isDone()) {
                 return false;
             }
+            if (future.isFailed()) {
+                System.err.println("Asynchronous export failed: " + failureOf(future));
+                System.err.flush();
+                throw new IllegalStateException("Asynchronous export failed", failureOf(future));
+            }
             returner.accept(future.get());
+            returned = true;
             return true;
+        }
+
+        private static Throwable failureOf(WitFuture<?> f) {
+            try {
+                f.get();
+                return null;
+            } catch (Throwable t) {
+                return t;
+            }
         }
     }
 
     private static final List<Task<?>> TASKS = new ArrayList<>();
 
-    private static int waitCode() {
-        return CALLBACK_WAIT | (set() << 4);
-    }
-
     /**
-     * Starts a callback-lifted export: returns the result through {@code task.return} right away
-     * if the future is complete, otherwise suspends the task until it is.
+     * Begins a callback-lifted export before its Java implementation runs, so that host
+     * operations the implementation starts belong to the task.
      *
-     * @param returner calls {@code task.return} with the lowered result
-     * @return the callback code to return from the export
+     * @return the task slot, to be passed to {@link #startTask}
      */
-    public static <T> int startTask(WitFuture<T> future, Consumer<T> returner) {
-        Task<T> task = new Task<>(future, returner);
-        if (task.finishIfDone()) {
-            return CALLBACK_EXIT;
-        }
+    public static int beginTask() {
+        Task<?> task = new Task<>();
         int slot = TASKS.indexOf(null);
         if (slot < 0) {
             slot = TASKS.size();
@@ -316,26 +424,62 @@ public final class WitScheduler {
             TASKS.set(slot, task);
         }
         contextSet(slot);
-        return waitCode();
+        currentTask = slot;
+        return slot;
+    }
+
+    /**
+     * Continues a callback-lifted export once its Java implementation returned a future: the
+     * result is passed to {@code task.return} as soon as the future completes, and the task exits
+     * once the host operations it started (for example writes to a returned stream) have finished.
+     *
+     * @param returner calls {@code task.return} with the lowered result
+     * @return the callback code to return from the export
+     */
+    @SuppressWarnings("unchecked")
+    public static <T> int startTask(int slot, WitFuture<T> future, Consumer<T> returner) {
+        currentTask = -1;
+        Task<T> task = (Task<T>) TASKS.get(slot);
+        task.future = future;
+        task.returner = returner;
+        return settle(slot, task);
+    }
+
+    private static int settle(int slot, Task<?> task) {
+        if (task.finishIfDone() && !hasPendingWork(slot)) {
+            task.dropSet();
+            TASKS.set(slot, null);
+            return CALLBACK_EXIT;
+        }
+        return CALLBACK_WAIT | (task.set() << 4);
     }
 
     /**
      * The callback of a callback-lifted export: dispatches the event and finishes the task if
      * its future completed.
      *
+     * @param taskCancel calls the {@code task.cancel} built-in of the exported interface
      * @return the callback code to return from the callback
      */
-    public static int callback(int code, int waitable, int payload) {
-        if (code == EVENT_TASK_CANCELLED) {
-            throw new IllegalStateException("Task cancellation is not supported yet");
-        }
-        dispatch(code, waitable, payload);
+    public static int callback(int code, int waitable, int payload, Runnable taskCancel) {
         int slot = contextGet();
         Task<?> task = TASKS.get(slot);
-        if (task.finishIfDone()) {
+        if (code == EVENT_TASK_CANCELLED) {
+            /*
+             * The host cancelled the export: cancel the Java future (which cancels pending
+             * subtasks it registered a canceller for), acknowledge with task.cancel (imported per
+             * exported interface by the generated adapter), and exit without a result.
+             */
+            if (task.future != null) {
+                task.future.cancel();
+            }
+            abandonWork(slot);
+            task.dropSet();
             TASKS.set(slot, null);
+            taskCancel.run();
             return CALLBACK_EXIT;
         }
-        return waitCode();
+        dispatch(code, waitable, payload);
+        return settle(slot, task);
     }
 }

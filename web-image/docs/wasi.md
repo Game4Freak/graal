@@ -117,8 +117,14 @@ Exported `async func` functions are declared as returning `WitFuture<T>` in the 
 Generate the WASI interfaces too with `--include-wasi` to use, for example, `wasi:cli/stdout#write-via-stream` directly.
 
 Exported resources become Java interfaces; their constructors and static functions are methods of the exported interface (`newCounter`, `counterGet`).
+An imported resource that is passed to the host by value must be given up with `transfer()`, which returns its handle and invalidates the Java object.
 
-Not supported yet: cancellation, `error-context`, and flags with more than 32 fields.
+An exported `async func` keeps running after its result is returned while streams it writes are still open, so an implementation can return a stream right away and fill it from continuations.
+`WitFuture.cancel()` cancels a pending call to the host; a cancelled export has its future cancelled and its continuations run with a `CancelledException`.
+
+Components built this way can be linked with other components, for example with `wac plug client.wasm --plug provider.wasm -o linked.wasm`, and the linked component runs with `wasmtime run`.
+
+Not supported yet: `error-context` (not used by WASI 0.3), cancelling a pending stream read or write, and flags with more than 32 fields.
 
 ## Limitations
 

@@ -276,22 +276,34 @@ public final class AbiEmitter {
         return def;
     }
 
-    /** Expression turning a Java resource value into a core handle. */
+    private boolean isOwn(TypeRef ref) {
+        TypeDef def = types.def(ref);
+        return !(def.kind instanceof Handle h) || h.own();
+    }
+
+    /**
+     * Expression turning a Java resource value into a core handle. Passing an owned imported
+     * resource transfers the handle, so the Java object no longer refers to it.
+     */
     private String toHandle(TypeRef ref, String value) {
         TypeDef res = resourceDef(ref);
         String adapter = types.exportedResourceAdapter(res);
         if (adapter != null) {
             return adapter + ".toHandle" + types.className(res) + "(" + value + ")";
         }
-        return value + ".handle()";
+        return isOwn(ref) ? value + ".transfer()" : value + ".handle()";
     }
 
-    /** Expression turning a core handle into a Java resource value. */
+    /**
+     * Expression turning a core handle into a Java resource value. An owned handle of an exported
+     * resource is dropped after the object was resolved, since the object (not the handle) is
+     * what Java code holds on to.
+     */
     private String fromHandle(TypeRef ref, String handle) {
         TypeDef res = resourceDef(ref);
         String adapter = types.exportedResourceAdapter(res);
         if (adapter != null) {
-            return adapter + ".fromHandle" + types.className(res) + "(" + handle + ")";
+            return adapter + (isOwn(ref) ? ".takeOwn" : ".fromHandle") + types.className(res) + "(" + handle + ")";
         }
         return "new " + types.className(res) + "(" + handle + ")";
     }
