@@ -39,6 +39,7 @@ import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.webimage.platform.WebImageWasiPlatform;
 import com.oracle.svm.webimage.wasi.WasiEnvironment;
 import com.oracle.svm.webimage.wasi.WasiExit;
+import com.oracle.svm.webimage.wasi.WasiRuntime;
 import com.oracle.svm.webimage.wasi.WasiStdio;
 
 /**
@@ -63,6 +64,7 @@ public class WebImageWasiJavaMainSupport extends WebImageWasmLMJavaMainSupport {
      *         error.
      */
     public static int run() {
+        WasiRuntime.markInitialized();
         return finish(doRun(javaArguments(), JavaMainWrapper::invokeMain));
     }
 

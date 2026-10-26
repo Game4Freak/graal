@@ -1064,6 +1064,7 @@ suite = {
         "name": "org.graalvm.webimage.api",
         "exports": [
           "org.graalvm.webimage.api",
+          "org.graalvm.webimage.api.wit",
         ],
       },
       "description": "The JavaScript interoperability API for GraalVM Web Image. This API is currently in preview and subject to change at any time.",

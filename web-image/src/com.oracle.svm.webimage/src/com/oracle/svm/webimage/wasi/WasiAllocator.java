@@ -45,6 +45,11 @@ public interface WasiAllocator {
     void free(Pointer pointer);
 
     /**
+     * Allocates unmanaged memory in the guest heap (8-byte aligned), or returns a null pointer.
+     */
+    Pointer allocate(int size);
+
+    /**
      * Frees the buffer at the given Canonical ABI address, if it is not null.
      */
     static void freeAddress(int address) {

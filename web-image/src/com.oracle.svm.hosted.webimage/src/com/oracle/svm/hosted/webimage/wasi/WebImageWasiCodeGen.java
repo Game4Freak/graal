@@ -27,6 +27,7 @@ package com.oracle.svm.hosted.webimage.wasi;
 import static com.oracle.svm.hosted.webimage.metrickeys.ImageBreakdownMetricKeys.ENTIRE_IMAGE_SIZE;
 import static com.oracle.svm.hosted.webimage.metrickeys.ImageBreakdownMetricKeys.WASM_IMAGE_SIZE;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -37,6 +38,7 @@ import org.graalvm.nativeimage.ImageSingletons;
 import com.oracle.svm.core.BuildArtifacts;
 import com.oracle.svm.core.c.libc.TemporaryBuildDirectoryProvider;
 import com.oracle.svm.core.image.ImageHeapLayoutInfo;
+import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.hosted.NativeImageGenerator;
 import com.oracle.svm.hosted.meta.HostedMethod;
 import com.oracle.svm.hosted.webimage.WebImageCodeCache;
@@ -46,6 +48,7 @@ import com.oracle.svm.hosted.webimage.logging.LoggerContext;
 import com.oracle.svm.hosted.webimage.util.metrics.ImageMetricsCollector;
 import com.oracle.svm.hosted.webimage.wasm.codegen.WasmTools;
 import com.oracle.svm.hosted.webimage.wasm.codegen.WebImageWasmLMCodeGen;
+import com.oracle.svm.shared.option.SubstrateOptionsParser;
 
 import jdk.graal.compiler.debug.DebugContext;
 
@@ -107,8 +110,20 @@ public class WebImageWasiCodeGen extends WebImageWasmLMCodeGen {
     protected void assembleWasmFile(Path watPath, Path wasmPath) {
         super.assembleWasmFile(watPath, wasmPath);
         Path tempDir = ImageSingletons.lookup(TemporaryBuildDirectoryProvider.class).getTemporaryBuildDirectory();
-        Path witDir = WasiWit.extract(tempDir);
-        WasmTools.singleton().componentize(witDir, WasiWit.COMMAND_WORLD, wasmPath, embeddedFile, componentFile, options, getProviders().stdout()::println);
+        Path witPath;
+        String world;
+        String userWit = WebImageWasiOptions.WitDirectory.getValue(options);
+        String userWorld = WebImageWasiOptions.WitWorld.getValue(options);
+        if (userWit != null) {
+            witPath = Path.of(userWit);
+            UserError.guarantee(Files.exists(witPath), "The WIT path %s does not exist", witPath);
+            UserError.guarantee(userWorld != null, "A world must be selected with %s when a WIT directory is given", SubstrateOptionsParser.commandArgument(WebImageWasiOptions.WitWorld, "<world>"));
+            world = userWorld;
+        } else {
+            witPath = WasiWit.extract(tempDir);
+            world = userWorld != null ? userWorld : WasiWit.COMMAND_WORLD;
+        }
+        WasmTools.singleton().componentize(witPath, world, wasmPath, embeddedFile, componentFile, options, getProviders().stdout()::println);
     }
 
     @Override

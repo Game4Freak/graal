@@ -31,11 +31,15 @@
                 JSResource.class,
                 StackifierVerification.class,
                 WasmExport.class,
+                WitExport.class,
+                WitImport.class,
 })
 package com.oracle.svm.hosted.webimage;
 
 import org.graalvm.webimage.api.JS;
 import org.graalvm.webimage.api.JSResource;
+import org.graalvm.webimage.api.wit.WitExport;
+import org.graalvm.webimage.api.wit.WitImport;
 
 import com.oracle.svm.common.annotation.GenerateAnnotationWrapper;
 import com.oracle.svm.webimage.annotation.StackifierVerification;

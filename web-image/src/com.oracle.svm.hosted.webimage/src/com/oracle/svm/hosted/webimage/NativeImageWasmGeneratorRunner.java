@@ -98,11 +98,6 @@ public class NativeImageWasmGeneratorRunner extends NativeImageGeneratorRunner {
                 continue;
             }
 
-            // Do not print the Backend option, it's not available in the svm-wasm macro
-            if (WebImageOptions.Backend == value.getOptionKey()) {
-                continue;
-            }
-
             String name = value.getName();
 
             if (value.getOptionValueType().equals(Boolean.class)) {

@@ -11,7 +11,7 @@ toc_group: web-image
 The WASI target of Web Image compiles a JVM application into a standalone [WebAssembly component](https://component-model.bytecodealliance.org/) that implements the `wasi:cli/command` world of [WASI 0.3](https://wasi.dev/).
 The component has no JavaScript wrapper and runs in any runtime that supports WASI 0.3, for example [Wasmtime](https://wasmtime.dev/) 46 or later.
 
-> Note: The WASI target is experimental and under active development. It is currently only available through the `web-image` launcher of a GraalVM source build.
+> Note: The WASI target is experimental and under active development.
 
 ## Prerequisites
 
@@ -22,7 +22,14 @@ In addition to the [prerequisites of Web Image](get-started.md#prerequisites), t
 
 ## Building
 
-Select the target with the `WASI` backend:
+Select the target with the `WASI` backend of the `svm-wasm` tool:
+
+```shell
+native-image --tool:svm-wasm -H:+UnlockExperimentalVMOptions -H:Backend=WASI -cp . HelloWasi
+```
+
+The `--tool:svm-wasm` option must come first.
+In a GraalVM source build, the `web-image` launcher accepts the same backend option:
 
 ```shell
 web-image -H:Backend=WASI -cp . HelloWasi
@@ -62,12 +69,53 @@ The following parts of the Java standard library are backed by WASI 0.3 interfac
 | `System.exit` | `wasi:cli/exit` |
 | `System.currentTimeMillis`, `System.nanoTime`, `Thread.sleep` | `wasi:clocks/system-clock`, `wasi:clocks/monotonic-clock` |
 | `SecureRandom`, `Math.random` | `wasi:random/random` |
+| `java.nio.file` and `java.io` files under a preopened directory | `wasi:filesystem/types`, `wasi:filesystem/preopens` |
 
 `System.getProperty("os.name")` returns `WASI`, `os.arch` returns `wasm32`, and `os.version` returns the implemented WASI version.
 
+## Custom WIT Interfaces
+
+A component can implement its own [WIT](https://component-model.bytecodealliance.org/design/wit.html) world instead of `wasi:cli/command`.
+The world must include the WASI interfaces used by the Java runtime:
+
+```wit
+package docs:calc;
+
+interface calculate {
+    record point { x: f64, y: f64 }
+    add: func(a: s32, b: s32) -> s32;
+    centroid: func(points: list<point>) -> point;
+}
+
+world calculator {
+    include wasi:cli/imports@0.3.0;
+    export calculate;
+}
+```
+
+Generate Java bindings for the world (the WASI packages must be available under `wit/deps`):
+
+```shell
+mx wit-bindgen --wit wit --world docs:calc/calculator --out src --java-package docs.calc
+```
+
+The generator produces one Java interface per exported WIT interface (`Calculate`), an adapter class with the Canonical ABI glue (`CalculateExports`), classes with static methods for imported interfaces, and Java types for the WIT types: records become Java records, variants become sealed interfaces, enums become Java enums, flags become records of booleans, `option<T>` becomes `Optional`, `result<T, E>` becomes `WitResult`, tuples become `TupleN` records, lists become `List` (or `byte[]` for `list<u8>`), and imported resources become classes with a `close()` method.
+Implement the interface and register the implementation in `META-INF/services/docs.calc.Calculate` (or call `CalculateExports.setImplementation`), then build with the world selected:
+
+```shell
+native-image --tool:svm-wasm -H:+UnlockExperimentalVMOptions -H:Backend=WASI -H:WitDirectory=wit -H:WitWorld=docs:calc/calculator -cp . Main
+wasmtime run --invoke 'add(2, 40)' main.wasm
+```
+
+Exported functions can be called before `main` runs; the runtime initializes itself on the first call.
+Low-level bindings can also be written by hand with `@WitImport`, `@WitExport`, and `WitMemory` from `org.graalvm.webimage.api.wit`.
+
+Not supported yet: exported resources, `stream`, `future`, and `async` functions, and flags with more than 32 fields.
+
 ## Limitations
 
-* The file system is an in-memory file system, as in the JavaScript hosts. `wasi:filesystem` is not used yet, so preopened directories are not visible to Java code.
+* Only directories preopened by the host (`--dir` in Wasmtime) are backed by the host file system. All other paths, for example `/tmp`, live in an in-memory file system that is empty at startup, as in the JavaScript hosts.
+* File attributes are limited to the basic view: POSIX permissions, owners, hard links, and changing timestamps are not supported.
 * Sockets and HTTP are not supported.
 * Stack traces are not available (`-H:+DisableStackTraces` is the default for this target).
 * The `@JS` annotation and other JavaScript interoperability features are not available. Using them results in a build error.

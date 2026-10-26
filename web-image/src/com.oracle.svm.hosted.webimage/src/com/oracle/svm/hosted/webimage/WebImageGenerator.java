@@ -37,6 +37,7 @@ import org.graalvm.collections.UnmodifiableEconomicMap;
 import org.graalvm.nativeimage.ImageInfo;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.webimage.api.JS;
+import org.graalvm.webimage.api.wit.WitExport;
 
 import com.oracle.graal.pointsto.infrastructure.SubstitutionProcessor;
 import com.oracle.graal.pointsto.util.Timer;
@@ -72,6 +73,7 @@ import com.oracle.svm.hosted.webimage.logging.LoggerScope;
 import com.oracle.svm.hosted.webimage.logging.visualization.VisualizationSupport;
 import com.oracle.svm.hosted.webimage.options.WebImageOptions;
 import com.oracle.svm.hosted.webimage.wasi.WebImageWasiJavaMainSupport;
+import com.oracle.svm.hosted.webimage.wasi.WitBindingFeature;
 import com.oracle.svm.hosted.webimage.wasm.WebImageWasmLMJavaMainSupport;
 import com.oracle.svm.hosted.webimage.wasm.annotation.WasmStartFunction;
 import com.oracle.svm.hosted.webimage.wasm.codegen.WasmWebImage;
@@ -237,6 +239,13 @@ public class WebImageGenerator extends NativeImageGenerator {
             for (ResolvedJavaMethod m : guestTypes.findAnnotatedMethods(WasmExport.class)) {
                 GraalError.guarantee(m.isStatic(), "Exported method %s.%s is not static. Add a static modifier to the method.", m.getDeclaringClass().toJavaName(), m.getName());
                 entryPoints.put(m, null);
+            }
+
+            if (WebImageOptions.getBackend() == WebImageOptions.CompilerBackend.WASI) {
+                for (ResolvedJavaMethod m : guestTypes.findAnnotatedMethods(WitExport.class)) {
+                    WitBindingFeature.checkExportSignature(m);
+                    entryPoints.put(m, null);
+                }
             }
         }
 

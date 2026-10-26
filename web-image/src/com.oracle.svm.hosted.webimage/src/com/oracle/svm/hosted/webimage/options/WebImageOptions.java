@@ -149,7 +149,7 @@ public class WebImageOptions {
      * Do not read this value directly. Instead, look it up based on the selected {@link Platform}
      * using {@link #getBackend}.
      */
-    @Option(help = "The Web Image Backend to use.") //
+    @Option(help = "The Web Image Backend to use. Under native-image only WASMGC (the default) and WASI can be selected.") //
     public static final EnumOptionKey<CompilerBackend> Backend = new EnumOptionKey<>(CompilerBackend.JS);
 
     @Option(help = "Report the code sizes of different parts of the generated JavaScript image. If the closure compiler is applied, this instruments the generated javascript code by injecting labels.")//

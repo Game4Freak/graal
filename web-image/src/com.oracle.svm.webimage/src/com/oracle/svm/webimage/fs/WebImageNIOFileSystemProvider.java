@@ -48,6 +48,11 @@ import java.nio.file.spi.FileSystemProvider;
 import java.util.Map;
 import java.util.Set;
 
+import org.graalvm.nativeimage.Platform;
+
+import com.oracle.svm.webimage.platform.WebImageWasiPlatform;
+import com.oracle.svm.webimage.wasi.WasiNioSupport;
+
 /**
  * Implementation for the default Java NIO {@link FileSystemProvider} for the {@code file} scheme.
  * <p>
@@ -115,6 +120,14 @@ public class WebImageNIOFileSystemProvider extends FileSystemProvider {
         throw new FileSystemNotFoundException("Provider \"" + Jimfs.URI_SCHEME + "\" not installed");
     }
 
+    /**
+     * Whether the path is served by the WASI file system (a preopened directory) instead of the
+     * in-memory file system. Only ever true on the WASI target.
+     */
+    private static boolean isWasi(Path path) {
+        return Platform.includedIn(WebImageWasiPlatform.class) && WasiNioSupport.isWasiPath(path);
+    }
+
     @Override
     public String getScheme() {
         return "file";
@@ -139,41 +152,69 @@ public class WebImageNIOFileSystemProvider extends FileSystemProvider {
 
     @Override
     public SeekableByteChannel newByteChannel(Path path, Set<? extends OpenOption> options, FileAttribute<?>... attrs) throws IOException {
+        if (isWasi(path)) {
+            return WasiNioSupport.newByteChannel(path, options, attrs);
+        }
         return getDelegate().newByteChannel(path, options, attrs);
     }
 
     @Override
     public DirectoryStream<Path> newDirectoryStream(Path dir, DirectoryStream.Filter<? super Path> filter) throws IOException {
+        if (isWasi(dir)) {
+            return WasiNioSupport.newDirectoryStream(dir, filter);
+        }
         return getDelegate().newDirectoryStream(dir, filter);
     }
 
     @Override
     public void createDirectory(Path dir, FileAttribute<?>... attrs) throws IOException {
+        if (isWasi(dir)) {
+            WasiNioSupport.createDirectory(dir, attrs);
+            return;
+        }
         getDelegate().createDirectory(dir, attrs);
     }
 
     @Override
     public void delete(Path path) throws IOException {
+        if (isWasi(path)) {
+            WasiNioSupport.delete(path);
+            return;
+        }
         getDelegate().delete(path);
     }
 
     @Override
     public void copy(Path source, Path target, CopyOption... options) throws IOException {
+        if (isWasi(source) || isWasi(target)) {
+            WasiNioSupport.copy(source, target, options);
+            return;
+        }
         getDelegate().copy(source, target, options);
     }
 
     @Override
     public void move(Path source, Path target, CopyOption... options) throws IOException {
+        if (isWasi(source) || isWasi(target)) {
+            WasiNioSupport.move(source, target, options);
+            return;
+        }
         getDelegate().move(source, target, options);
     }
 
     @Override
     public boolean isSameFile(Path path, Path path2) throws IOException {
+        if (isWasi(path)) {
+            return WasiNioSupport.isSameFile(path, path2);
+        }
         return getDelegate().isSameFile(path, path2);
     }
 
     @Override
     public boolean isHidden(Path path) throws IOException {
+        if (isWasi(path)) {
+            return WasiNioSupport.isHidden(path);
+        }
         return getDelegate().isHidden(path);
     }
 
@@ -184,26 +225,43 @@ public class WebImageNIOFileSystemProvider extends FileSystemProvider {
 
     @Override
     public void checkAccess(Path path, AccessMode... modes) throws IOException {
+        if (isWasi(path)) {
+            WasiNioSupport.checkAccess(path, modes);
+            return;
+        }
         getDelegate().checkAccess(path, modes);
     }
 
     @Override
     public <V extends FileAttributeView> V getFileAttributeView(Path path, Class<V> type, LinkOption... options) {
+        if (isWasi(path)) {
+            return WasiNioSupport.getFileAttributeView(path, type, options);
+        }
         return getDelegate().getFileAttributeView(path, type, options);
     }
 
     @Override
     public <A extends BasicFileAttributes> A readAttributes(Path path, Class<A> type, LinkOption... options) throws IOException {
+        if (isWasi(path)) {
+            return WasiNioSupport.readAttributes(path, type, options);
+        }
         return getDelegate().readAttributes(path, type, options);
     }
 
     @Override
     public Map<String, Object> readAttributes(Path path, String attributes, LinkOption... options) throws IOException {
+        if (isWasi(path)) {
+            return WasiNioSupport.readAttributes(path, attributes, options);
+        }
         return getDelegate().readAttributes(path, attributes, options);
     }
 
     @Override
     public void setAttribute(Path path, String attribute, Object value, LinkOption... options) throws IOException {
+        if (isWasi(path)) {
+            WasiNioSupport.setAttribute(path, attribute, value, options);
+            return;
+        }
         getDelegate().setAttribute(path, attribute, value, options);
     }
 }

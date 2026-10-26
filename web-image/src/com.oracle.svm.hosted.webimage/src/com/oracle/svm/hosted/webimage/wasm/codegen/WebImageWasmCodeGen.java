@@ -48,6 +48,7 @@ import com.oracle.svm.hosted.NativeImageGenerator;
 import com.oracle.svm.hosted.image.AbstractImage;
 import com.oracle.svm.hosted.meta.HostedMethod;
 import com.oracle.svm.hosted.webimage.WasmExportGuestValue;
+import com.oracle.svm.hosted.webimage.WitExportGuestValue;
 import com.oracle.svm.hosted.webimage.WebImageCodeCache;
 import com.oracle.svm.hosted.webimage.WebImageHostedConfiguration;
 import com.oracle.svm.hosted.webimage.codegen.LowerableResource;
@@ -87,6 +88,7 @@ import com.oracle.svm.webimage.functionintrinsics.JSSystemFunction;
 import com.oracle.svm.webimage.hightiercodegen.Emitter;
 import com.oracle.svm.webimage.hightiercodegen.IEmitter;
 import com.oracle.svm.webimage.wasmgc.annotation.WasmExport;
+import org.graalvm.webimage.api.wit.WitExport;
 
 import jdk.graal.compiler.debug.DebugContext;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
@@ -315,6 +317,10 @@ public abstract class WebImageWasmCodeGen extends WebImageCodeGen {
             if (GuestAnnotationAccess.isAnnotationPresent(entryPoint, WasmExport.class)) {
                 WasmExportGuestValue annotation = WasmExportGuestValue.get(entryPoint);
                 module.addFunctionExport(getProviders().idFactory().forMethod(entryPoint), annotation.value(), annotation.comment().isEmpty() ? null : annotation.comment());
+            }
+
+            if (GuestAnnotationAccess.isAnnotationPresent(entryPoint, WitExport.class)) {
+                module.addFunctionExport(getProviders().idFactory().forMethod(entryPoint), WitExportGuestValue.get(entryPoint).value(), "@WitExport in " + entryPoint.format("%H.%n"));
             }
 
             if (GuestAnnotationAccess.isAnnotationPresent(entryPoint, WasmStartFunction.class)) {

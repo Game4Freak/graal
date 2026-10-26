@@ -69,5 +69,23 @@ public final class WasiCalls {
     public static native int callIIII(@Node.ConstantNodeParameter ForeignCallDescriptor descriptor, int a, int b, int c);
 
     @Node.NodeIntrinsic(ForeignCallNode.class)
+    public static native void callVIII(@Node.ConstantNodeParameter ForeignCallDescriptor descriptor, int a, int b, int c);
+
+    @Node.NodeIntrinsic(ForeignCallNode.class)
+    public static native void callVIIII(@Node.ConstantNodeParameter ForeignCallDescriptor descriptor, int a, int b, int c, int d);
+
+    @Node.NodeIntrinsic(ForeignCallNode.class)
+    public static native void callVIIIII(@Node.ConstantNodeParameter ForeignCallDescriptor descriptor, int a, int b, int c, int d, int e);
+
+    @Node.NodeIntrinsic(ForeignCallNode.class)
+    public static native void callVIIIIIII(@Node.ConstantNodeParameter ForeignCallDescriptor descriptor, int a, int b, int c, int d, int e, int f, int g);
+
+    @Node.NodeIntrinsic(ForeignCallNode.class)
+    public static native void callVILI(@Node.ConstantNodeParameter ForeignCallDescriptor descriptor, int a, long b, int c);
+
+    @Node.NodeIntrinsic(ForeignCallNode.class)
+    public static native int callIIIL(@Node.ConstantNodeParameter ForeignCallDescriptor descriptor, int a, int b, long c);
+
+    @Node.NodeIntrinsic(ForeignCallNode.class)
     public static native long callL(@Node.ConstantNodeParameter ForeignCallDescriptor descriptor);
 }

@@ -1,6 +1,6 @@
 # Plan: WASI 0.3 and Component Model Support for Web Image
 
-Status: in progress, last updated 2026-10-26 (Phase 0 done, Phase 1 done, Phase 2 mostly done except the file system).
+Status: in progress, last updated 2026-10-26 (Phases 0 to 4 done except exported resources and CI, Phases 5 and 6 open).
 This document records the plan for teaching the Native Image WebAssembly backend (Web Image) to produce a WebAssembly component that targets WASI 0.3 (also known as WASI Preview 3, or "p3") and to generate bindings for custom WebAssembly Interface Type (WIT) interfaces, including `async` functions, `stream<T>`, and `future<T>`.
 
 ## Goals
@@ -131,13 +131,14 @@ Verify every signature against the vendored WIT before implementing; names below
 | args, env, cwd | `process.argv` marshalled through `malloc` in `wasm-run.js`; env always empty (`Target_java_lang_ProcessEnvironment_Web`); cwd from `cwd.js` | `wasi:cli/environment`: `get-arguments`, `get-initial-cwd`, and `get-environment` done (the program name in `argv[0]` is dropped; host-allocated buffers are freed through `WasiAllocator`) |
 | `System.currentTimeMillis`, `nanoTime`, `Thread.sleep` | `Date.now`, `performance.now` interop imports (`WebImageJavaLangSubstitutions.java:245-303`); `Thread.sleep` is a no-op | `wasi:clocks/system-clock` and `wasi:clocks/monotonic-clock` (`now`, and `wait-for` with a synchronous lowering for `Thread.sleep`) (done) |
 | `SecureRandom`, seeds | `Math.random` via `WebImageUtil.random` (`WebImageSecuritySubstitutions`) | `wasi:random/random` (`get-random-bytes` for `NativePRNG`, `get-random-u64` for `WebImageUtil.random`) (done) |
-| file system | in-memory `WebImageNIOFileSystem` | `wasi:filesystem/types` and `wasi:filesystem/preopens`; keep the in-memory FS as the fallback and mount preopens over it |
+| file system | in-memory `WebImageNIOFileSystem` | `wasi:filesystem/types` and `wasi:filesystem/preopens` (done): `WebImageNIOFileSystemProvider` routes paths under a preopened directory to `WasiNioSupport`/`WasiFileSystem`, everything else stays in the in-memory file system. Files are read and written through `read-via-stream`/`write-via-stream`/`append-via-stream` (`WasiFileChannel`), directories through `read-directory`. Basic attributes, create, delete, rename, copy, symlink-follow flags, and error mapping are covered; POSIX attributes, timestamps, and links are not. |
 | sockets | unsupported | `wasi:sockets` (optional, later) |
 | HTTP | `WebImageHttpHandlerSubstitutions` | `wasi:http` (optional, later; enables `wasi:http/proxy` worlds) |
 
 Implementation notes:
 
-- Status (2026-10-26): everything in the table except the file system, sockets, and HTTP is implemented and verified with a test program under Wasmtime 50 (`os.name` is `WASI`, `os.arch` is `wasm32`, `os.version` is `0.3.0`).
+- Status (2026-10-26): everything in the table except sockets and HTTP is implemented and verified with test programs under Wasmtime 50 (`os.name` is `WASI`, `os.arch` is `wasm32`, `os.version` is `0.3.0`).
+  The file system test (`wasmtime run -S cwd=/work --dir work::/work fstest.wasm /work`) covers NIO and `java.io` reads and writes, append, listing, a 300 KB round trip with seeks, rename, copy, error mapping, and the in-memory fallback for `/tmp`.
   The LM and WasmGC backends were re-run on the same test program under Node to check for regressions.
 - Found and fixed on the way: the LM lowerer did not dispatch `BinaryMathIntrinsicGenerationNode` (so `Math.pow` failed to compile on the LM backend); import ids are now sanitized for the Wasm text format.
 
@@ -154,7 +155,9 @@ Status (2026-10-26): the test utilities run images with Wasmtime when `-H:Backen
 `mx unittest "-Dwebimage.test.additional_vm_options=-H:+StrictWarnings,-H:Backend=WASI" JS_JTT_Bytecodes` passes all 204 tests under Wasmtime, and `JS_JTT_Zip` passes too (in-memory file system).
 The JavaScript-only suites (`JS_JTT_JavaScriptBody`, `JS_JTT_JSAnnotation`, `JS_JTT_XHR`) skip themselves on WASI through `WebImageTestOptions.isJSHost()`.
 The whole `JS_JTT_Spec_Test` suite passes on WASI (205 tests, JavaScript-only suites skipped); `mx gate --tags webimagespectest --backend WASI` runs it because the gate passes `--backend` through as `-H:Backend=`.
-A dedicated gate tag and a CI job (with `wasm-tools` and `wasmtime` provisioned in `web-image/ci/`) are still open.
+The gate tag `webimagewasitest` runs the spec tests as WASI components (`mx gate --tags webimagewasitest`, optionally with `--spectest`).
+A CI job with `wasm-tools` and `wasmtime` provisioned in `web-image/ci/` is still open.
+`native-image --tool:svm-wasm -H:+UnlockExperimentalVMOptions -H:Backend=WASI` produces the component as well (verified; the default WasmGC path is unchanged).
 
 - Add a `mx` gate task for the WASI target (`--backend WASM --host wasi`) and a `WASMTIME_EXE` environment variable analogous to `NODE_EXE`, wired through a new `webimage.test.wasmtime` system property in `WebImageSpecTestConfig`.
 - Extend `WebImageTestUtil` with a `runComponent` counterpart to `runJS`, and `mx_web_image.py` with helpers to run a component under Wasmtime with `--dir` and `--env` mappings for file system and environment tests.
@@ -180,6 +183,18 @@ User-facing API, in the SDK package `org.graalvm.webimage.api` or a new `org.gra
 
 Deliverable: a sample world with imports and exports (records, variants, lists, strings, resources) that round-trips through a Rust or Python host component under Wasmtime, plus `jtt` tests.
 
+Status (2026-10-26), step 1 done: the raw binding layer exists and is verified with a hand-written binding for a custom world.
+
+- Public API in the SDK (`org.graalvm.webimage.api.wit`, distribution `WEBIMAGE_PREVIEW`): `@WitImport(module, name)` on `static native` methods, `@WitExport(name)` on static methods (both with Canonical ABI core signatures: `int`, `long`, `float`, `double`), and `WitMemory` (allocate, free, typed reads and writes, array copies, `ensureInitialized`).
+- Builder: `WitBindingFeature` turns `@WitImport` calls into import calls through a `NodePlugin`; `@WitExport` methods become entry points and core exports; `-H:WitDirectory=` and `-H:WitWorld=` select the user's world for `wasm-tools component embed` (the world must `include wasi:cli/imports@0.3.0`, and `wasm-tools` prunes unused imports from the embedded type).
+- Runtime: `WitMemory` is substituted onto `WasiMemory`/`WasiAllocator`; `WasiRuntime.ensureInitialized` runs the library initialization when an export is called before `main` (reactor-style components).
+- Verified: a `test:calc` world with an exported interface (`add`, `greet` with string in and out plus `cabi_post_`, `sum` over `list<f64>`) and a world-level export calling a WASI import, invoked with `wasmtime run --invoke`.
+- Step 2 done (2026-10-26): the generator `com.oracle.svm.hosted.webimage.wasi.bindgen.WitBindgen` (`mx wit-bindgen --wit <dir> --world <pkg/world> --out <dir> --java-package <pkg>`) reads `wasm-tools component wit --json` and emits Java sources: records, sealed variants, enums, flags records, `Optional`, `WitResult`, `TupleN`, lists, imported resources as classes, imported interfaces as static-method classes, exported interfaces as Java interfaces plus `@WitExport` adapters (`ServiceLoader` or `setImplementation`), and a world class for world-level functions.
+  Flat values travel as `long[]` (f32 as zero-extended raw bits) so the Canonical ABI join rules reduce to zero-extension; parameters beyond 16 flats are spilled to memory and multi-flat results use a return pointer plus `cabi_post_`.
+  Verified with a `test:calc` world covering every type kind (14 exports invoked with `wasmtime run --invoke`, including u8/u64 edge values, `char`, a 17-flat function, `list<result<f64, string>>`, and `list<shape>`); a second world with an imported resource and world-level import compiles.
+  Not supported: exported resources, `stream`, `future`, `async`, flags with more than 32 fields.
+  WASI packages are skipped by default (`--include-wasi` to generate them anyway).
+
 ### Phase 5: Async Support in Bindgen
 
 Java has no language-level async, and the single-threaded Wasm backends cannot switch stacks, so async maps onto a stackless, callback-driven design.
@@ -197,6 +212,18 @@ Java has no language-level async, and the single-threaded Wasm backends cannot s
 
 Deliverable: an async echo and a streaming example (for example a `wasi:http/proxy` handler) validated with Wasmtime's `component-model-async` enabled.
 
+Design notes (2026-10-26), refined from what Phases 1 to 4 established:
+
+- Imports: the generator already knows every function's flat signature. For an `async func` import, emit a second native with the `[async-lower]` prefix; its core signature is the flat params followed by a return pointer for the lifted result, and it returns `i32` (`subtask status` packed as `(subtask handle << 4) | state`). If the state is `RETURNED`, lift from the return pointer immediately. Otherwise register the subtask handle in a `WitFuture` and return it; the result pointer must stay allocated until the subtask returns (allocate it outside the arena and free it in the completion handler).
+- A runtime scheduler (`WitTaskScheduler`, runtime project) owns one `waitable-set` and a map from waitable handle to continuation. `WitFuture.join()` blocks with `waitable-set.wait` and dispatches events until its own completes; this is the only blocking primitive and is legal from synchronously lifted exports, which is what the runtime uses today. `subtask.drop` after `RETURNED`.
+- Exports: lift with `[async-lift]` plus `[callback]` (names `[async-lift]<export>` and `[callback][async-lift]<export>`). The adapter runs the Java method once; the method returns a `WitFuture<T>`. If it is already complete, call `[task-return]<export>` with the lowered flats and return `EXIT` (0). Otherwise store the pending future in `context.set` (slot 0) and return `WAIT | (set << 4)` for the scheduler's waitable set. The callback export receives the event, dispatches it through the scheduler, and repeats the check. Because the whole runtime is single-threaded and the host only calls the callback when no Java frame is active, this is a stackless state machine over `CompletableFuture`-style continuations in Java code.
+- Streams and futures: `WitReadableStream<T>`/`WitWritableStream<T>` wrap the handle plus the element type's `Abi` helpers (lower/lift of one element into a buffer of `n * size`). `read(T[])`/`write(T[])` block (asynchronous builtin plus `WitFuture.join()`), `readAsync` returns a `WitFuture<Integer>`. `future<T>` becomes `WitFuture<T>` (readable end) and `WitFutureWriter<T>`. Element helpers for the stream type come from `Abi` as for lists.
+- `error-context`: `[error-context-new-utf8]`, `[error-context-debug-message-utf8]`, `[error-context-drop]` wrapped in `WitErrorContext extends Exception`.
+- Cancellation: `[subtask-cancel]` from `WitFuture.cancel()`, `[task-cancel]` when an export is cancelled by the host (callback event `TASK_CANCELLED`).
+- Generated Java shape: `async func` imports return `WitFuture<T>`; `async func` exports are declared in the Java interface as returning `WitFuture<T>`; `stream<T>` parameters and results use the stream wrappers.
+- Required Wasmtime flags: none for the async lift/lower and stream built-ins (verified in Phase 0 with default flags on Wasmtime 50); `-W component-model-async-stackful` is not needed.
+- Prerequisite in the builder: `WitBindingFeature` must allow the `[async-lift]`, `[callback]`, and `[task-return]` export and import names (they are plain `@WitExport`/`@WitImport` names, so no change is expected) and the codegen must keep the exported Java method's core signature intact.
+
 ### Phase 6: Hardening and Follow-ups
 
 - Size and performance: run `wasm-opt` on the core module before `component new`; compare against the JS host.
@@ -209,9 +236,8 @@ Deliverable: an async echo and a streaming example (for example a `wasi:http/pro
 
 - Stdout stream lifetime: the runtime creates one stream per fd for the whole run and awaits the returned future on exit. Confirm this is the intended usage and measure the cost of a `waitable-set.wait` per write when the host blocks.
 - Which world to implement by default: `wasi:cli/command` only, or also a "library" world with no `run` export for reactor-style components.
-- How to expose the target through the `native-image` launcher: `--tool:svm-wasm` forces the WasmGC backend in `WebImagePlatformInjector` and the `Backend` option is deliberately not provided by the macro.
-  Options are a second macro (`--tool:svm-wasi`) or an option such as `-H:WasmTarget=wasi` that the injector honors.
-  Until decided, the target is only reachable through `mx web-image -H:Backend=WASI`.
+- Exposure through `native-image` (done, revisit the spelling): `WebImagePlatformInjector` now honors an explicit `-H:Backend=WASI` under `--tool:svm-wasm` and the macro provides the `Backend` option; other backend values still fall back to WasmGC under `native-image`.
+  A dedicated `--tool:svm-wasi` macro would avoid the experimental option unlock and is still an option.
 - How `@JS`-based libraries (for example the existing `JSObject` API) should behave when a user targets WASI: hard error versus best-effort stubs.
 - Whether bindgen should run inside the image builder (no extra build step, but no IDE completion) or as a separate code generator (extra step, but normal Java tooling).
   The plan above assumes a separate generator for sources plus in-builder lowering.

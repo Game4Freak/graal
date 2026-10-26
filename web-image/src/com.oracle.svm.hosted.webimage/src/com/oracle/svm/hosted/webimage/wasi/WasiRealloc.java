@@ -60,6 +60,11 @@ public final class WasiRealloc {
         public void free(Pointer pointer) {
             WasmAllocation.doFree(pointer);
         }
+
+        @Override
+        public Pointer allocate(int size) {
+            return WasmAllocation.doMalloc(Word.unsigned(Math.max(size, 1)));
+        }
     }
 
     @WasmExport(value = "cabi_realloc", comment = "Canonical ABI realloc")

@@ -38,18 +38,20 @@ import com.oracle.svm.hosted.webimage.options.WebImageOptions;
  * Sets the {@link Platform#PLATFORM_PROPERTY_NAME} property based on which code-generation backend
  * is selected.
  * <p>
- * In the {@code native-image} launcher this is always the WasmGC backend. Under {@code web-image},
- * it is determined by the {@link WebImageOptions#Backend} option.
+ * In the {@code native-image} launcher this is the WasmGC backend unless {@code -H:Backend=WASI}
+ * selects the WASI target. Under {@code web-image}, it is determined by the
+ * {@link WebImageOptions#Backend} option.
  */
 public class WebImagePlatformInjector implements NativeImageClassLoaderPostProcessing {
     @Override
     public void apply(NativeImageClassLoaderSupport support) {
-        CompilerBackend backend;
-        if (isNativeImageBackend()) {
-            // Under native-image, selection of the Web Image backend is not allowed
+        CompilerBackend backend = WebImageOptions.Backend.getValue(support.getParsedHostedOptions());
+        if (isNativeImageBackend() && backend != CompilerBackend.WASI) {
+            /*
+             * Under native-image, only the WasmGC backend (the default) and the WASI target can be
+             * selected. The JS and plain linear memory backends stay Web Image only.
+             */
             backend = CompilerBackend.WASMGC;
-        } else {
-            backend = WebImageOptions.Backend.getValue(support.getParsedHostedOptions());
         }
 
         /*

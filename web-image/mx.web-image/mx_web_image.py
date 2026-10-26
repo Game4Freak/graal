@@ -72,6 +72,7 @@ web_image_hosted_options = [
     "AnalyzeCompoundConditionals",
     "AutoRunLibraries=",
     "AutoRunVM",
+    "Backend=",
     "BenchmarkName=",
     "ClearFreeMemory",
     "CLIVisualizationMonochrome",
@@ -119,6 +120,8 @@ web_image_hosted_options = [
     "WasmAsPath=",
     "WasmComments=",
     "WasmToolsPath=",
+    "WitDirectory=",
+    "WitWorld=",
     "WasmVerifyReferences",
     "Wat2WasmPath=",
 ]
@@ -256,6 +259,16 @@ class GraalWebImageTags:
     webimageprettier = "webimageprettier"
     webimagehelp = "webimagehelp"
     webimageoptions = "webimageoptions"
+    webimagewasitest = "webimagewasitest"
+
+
+@mx.command(_suite.name, "wit-bindgen", "--wit <path> --world <pkg/world> --out <dir> --java-package <pkg>")
+def wit_bindgen(args=None):
+    """generates Java bindings for a WIT world (requires wasm-tools on the PATH)"""
+    mx.run_java(
+        ["-cp", mx.classpath("SVM_WASM"), "com.oracle.svm.hosted.webimage.wasi.bindgen.WitBindgen"] + (args or []),
+        jdk=mx.get_jdk(),
+    )
 
 
 @mx.command(_suite.name, "webimageprettier")
@@ -440,6 +453,20 @@ def gate_runner(args, tasks):
     ) as t:
         if t:
             unittest(["--verbose", "--enable-timing", "-Dwebimage.test.closure_compiler=true"] + unittest_args)
+
+    with Task("Web Image WASI Spec Tests", tasks, tags=[GraalWebImageTags.webimagewasitest]) as t:
+        if t:
+            # Runs the spec tests as WASI components under wasmtime, regardless of --backend
+            wasi_options = ["-H:+StrictWarnings", "-H:Backend=WASI"] + (args.spectest_argument or [])
+            unittest(
+                [
+                    "--verbose",
+                    "--enable-timing",
+                    "-Dwebimage.test.max_failures=10",
+                    "-Dwebimage.test.additional_vm_options=" + ",".join(wasi_options),
+                    args.spectest or "JS_JTT_Spec_Test",
+                ]
+            )
 
     with Task("Check mx web-image --help", tasks, tags=[GraalWebImageTags.webimagehelp]) as t:
         if t:
