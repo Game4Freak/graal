@@ -61,13 +61,15 @@ Hello World
 
 ## WASI Target
 
-The `WASI` backend produces a standalone WebAssembly component for WASI 0.3
+The `svm-wasi` tool produces a standalone WebAssembly component for WASI 0.3
 instead of a module with a JavaScript wrapper:
 
 ```bash
-mx web-image -H:Backend=WASI -cp ... HelloWorld
+mx native-image --tool:svm-wasi -cp ... HelloWorld
 wasmtime run helloworld.wasm
 ```
+
+The `web-image` launcher selects the same target with `-H:Backend=WASI`.
 
 It needs `wasm-tools` (1.240 or later) on the `PATH` in addition to `wasm-as`.
 See [docs/wasi.md](docs/wasi.md) for details and `WASI_P3_PLAN.md` for the

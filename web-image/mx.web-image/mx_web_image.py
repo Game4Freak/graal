@@ -57,6 +57,8 @@ _web_image_wasmtime_cmd = [os.getenv("WASMTIME_EXE", "wasmtime"), "run"]
 web_image_component = "web-image"
 # Name of GraalVm component defining the svm-wasm macro
 svm_wasm_component = "niwasm"
+# Name of GraalVm component defining the svm-wasi macro
+svm_wasi_component = "niwasi"
 web_image_builder = "web-image:SVM_WASM"
 web_image_builder_jars = [
     web_image_builder,
@@ -134,6 +136,7 @@ class WebImageConfiguration:
     graalvm_component = web_image_component
 
     svm_wasm_component = svm_wasm_component
+    svm_wasi_component = svm_wasi_component
 
     builder_jars = web_image_builder_jars
 
@@ -170,6 +173,10 @@ class WebImageConfiguration:
     @classmethod
     def get_svm_wasm_component(cls) -> mx_sdk_vm.GraalVmComponent:
         return mx_sdk_vm.graalvm_component_by_name(cls.svm_wasm_component)
+
+    @classmethod
+    def get_svm_wasi_component(cls) -> mx_sdk_vm.GraalVmComponent:
+        return mx_sdk_vm.graalvm_component_by_name(cls.svm_wasi_component)
 
     @classmethod
     def get_all_suites(cls) -> List[mx.Suite]:
@@ -589,6 +596,7 @@ class WebImageMacroBuilder(mx.ArchivableProject):
         java_args: Optional[List[str]] = None,
         image_provided_jars: Optional[List[str]] = None,
         provided_hosted_options: Optional[List[str]] = None,
+        args: Optional[List[str]] = None,
     ):
         """
         :param builder_dists: Distributions included for the builder. Exactly these are added to
@@ -598,6 +606,7 @@ class WebImageMacroBuilder(mx.ArchivableProject):
         :param java_args: Additional flags to add to ``JavaArgs``
         :param image_provided_jars: Distributions that should be added to ``ImageProvidedJars``
         :param provided_hosted_options: Options that should be added to ``ProvidedHostedOptions``
+        :param args: Builder arguments added to ``Args`` (as if passed on the native-image command line)
         """
         super().__init__(suite, name, [], None, None, buildDependencies=builder_dists)
         self.builder_dists = builder_dists
@@ -605,6 +614,7 @@ class WebImageMacroBuilder(mx.ArchivableProject):
         self.java_args = java_args or []
         self.image_provided_jars = image_provided_jars or []
         self.provided_hosted_options = provided_hosted_options or []
+        self.args = args or []
 
     def output_dir(self):
         return self.get_output_root()
@@ -705,6 +715,10 @@ class WebImageMacroBuildTask(mx.ArchivableBuildTask):
                     "ImageBuilderModulePath = " + self._escaped_macro_paths(self._macro_relative_paths(builder_jars))
                 )
 
+            if self.subject.args:
+                # Arguments passed to the builder as if given on the command line
+                lines.append("Args = " + " ".join(mx_sdk_vm_impl.java_properties_escape(a) for a in self.subject.args))
+
             if self.subject.image_provided_jars:
                 # These jars are added to the module path passed to the builder (not the builder's JVM)
                 # It only differs from ImageModulePath in that the latter will not result in "." being added to the
@@ -751,6 +765,7 @@ def create_web_image_macro_builder(
     builder_jars: List[str],
     java_args: Optional[List[str]] = None,
     provided_hosted_options: Optional[List[str]] = None,
+    args: Optional[List[str]] = None,
 ) -> WebImageMacroBuilder:
     """
     Creates a :class:`WebImageMacroBuilder`.
@@ -770,7 +785,7 @@ def create_web_image_macro_builder(
     if component not in graalvm_dist.components:
         # If no macro path was found, the macro is useless anyway (since it's not included in a graalvm distribution).
         # Since things depend on this project, we just produce an empty macro
-        return WebImageMacroBuilder(defining_suite, name, [], graalvm_dist.jdk_base)
+        return WebImageMacroBuilder(defining_suite, name, [], graalvm_dist.jdk_base, args=args)
     else:
         # It seems we can't look up the path of the component itself. Instead, we use the support distribution,
         # which is placed at the macro root, to look up the macro location
@@ -786,6 +801,7 @@ def create_web_image_macro_builder(
             java_args=java_args,
             image_provided_jars=component.jar_distributions,
             provided_hosted_options=provided_hosted_options,
+            args=args,
         )
 
 
@@ -808,6 +824,25 @@ svm_wasm_macro = mx_sdk_vm.GraalVmSvmTool(
     support_distributions=["web-image:NATIVE_IMAGE_WASM_SUPPORT"],
 )
 mx_sdk_vm.register_graalvm_component(svm_wasm_macro)
+
+# Defines the svm-wasi tool macro that selects the WASI target (a standalone WebAssembly component) of the Wasm backend
+svm_wasi_macro = mx_sdk_vm.GraalVmSvmTool(
+    suite=_suite,
+    name="Native Image WASI Target",
+    short_name=svm_wasi_component,
+    dir_name="svm-wasi",
+    license_files=[],
+    third_party_license_files=[],
+    jar_distributions=[],
+    priority=0,
+    builder_jar_distributions=[
+        "web-image:SVM_WASM",
+        "web-image:SVM_WASM_JIMFS",
+        "web-image:SVM_WASM_GUAVA",
+    ],
+    support_distributions=["web-image:NATIVE_IMAGE_WASI_SUPPORT"],
+)
+mx_sdk_vm.register_graalvm_component(svm_wasi_macro)
 
 web_image_macro = mx_sdk_vm.GraalVmSvmTool(
     suite=_suite,
@@ -865,6 +900,19 @@ def mx_register_dynamic_suite_constituents(register_project, register_distributi
             wasm_component,
             wasm_component.builder_jar_distributions,
             provided_hosted_options=WebImageConfiguration.get_hosted_options(),
+        )
+    )
+
+    wasi_component = WebImageConfiguration.get_svm_wasi_component()
+    register_project(
+        create_web_image_macro_builder(
+            _suite,
+            "svm-wasi-macro-builder",
+            wasi_component,
+            wasi_component.builder_jar_distributions,
+            provided_hosted_options=WebImageConfiguration.get_hosted_options(),
+            # Selects the WASI target; the option is experimental, so it is unlocked only for this argument
+            args=["-H:+UnlockExperimentalVMOptions", "-H:Backend=WASI", "-H:-UnlockExperimentalVMOptions"],
         )
     )
 

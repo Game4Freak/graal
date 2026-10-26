@@ -32,6 +32,7 @@ import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Case;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Enum;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Field;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Flags;
+import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Future;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Handle;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Kind;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.ListKind;
@@ -39,6 +40,7 @@ import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Option;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Prim;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Record;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Resource;
+import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Stream;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Result;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Tuple;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.TypeDef;
@@ -59,6 +61,7 @@ public final class WitTypes {
     }
 
     public static final int MAX_FLAT_PARAMS = 16;
+    public static final int MAX_FLAT_ASYNC_PARAMS = 4;
     public static final int MAX_FLAT_RESULTS = 1;
 
     private final WitModel model;
@@ -91,12 +94,60 @@ public final class WitTypes {
 
     // Java types
 
-    /** The name of the generated class for a named type definition. */
-    public String className(TypeDef def) {
+    /** Adapter class per exported resource (by defining type id). */
+    private final java.util.Map<Integer, String> exportedResourceAdapters = new java.util.HashMap<>();
+
+    public void registerExportedResource(int resourceId, String adapterClass) {
+        exportedResourceAdapters.put(resourceId, adapterClass);
+    }
+
+    /**
+     * The adapter class holding the handle table of an exported resource, or null for imported
+     * resources.
+     */
+    public String exportedResourceAdapter(TypeDef resourceDef) {
+        TypeDef resolved = model.definition(new WitModel.Id(resourceDef.id));
+        return exportedResourceAdapters.get((resolved != null ? resolved : resourceDef).id);
+    }
+
+    private final java.util.Map<Integer, String> classNames = new java.util.HashMap<>();
+    private final java.util.Set<String> takenClassNames = new java.util.HashSet<>();
+
+    /**
+     * The name of the generated class for a named type definition. All classes live in one Java
+     * package, so a type whose name is already used by a type of another WIT package gets the
+     * package name as prefix (for example {@code FilesystemErrorCode}).
+     */
+    public String className(TypeDef aliasOrDef) {
+        // Types imported with `use` are aliases of the defining type, which owns the class
+        TypeDef resolved = model.definition(new WitModel.Id(aliasOrDef.id));
+        TypeDef def = resolved != null ? resolved : aliasOrDef;
         if (def.name == null) {
             throw new IllegalArgumentException("Type " + def.id + " is anonymous");
         }
-        return JavaNames.type(def.name);
+        String assigned = classNames.get(def.id);
+        if (assigned != null) {
+            return assigned;
+        }
+        String name = JavaNames.type(def.name);
+        if (takenClassNames.contains(name)) {
+            String prefix = "";
+            if (def.ownerInterface >= 0) {
+                WitModel.Interface owner = model.interfaceOf(def.ownerInterface);
+                if (owner.pkg >= 0) {
+                    prefix = JavaNames.type(model.packageOf(owner.pkg).packageName());
+                }
+            }
+            String candidate = prefix + name;
+            int counter = 2;
+            while (takenClassNames.contains(candidate)) {
+                candidate = prefix + name + counter++;
+            }
+            name = candidate;
+        }
+        takenClassNames.add(name);
+        classNames.put(def.id, name);
+        return name;
     }
 
     public String javaType(TypeRef ref, boolean boxed) {
@@ -135,9 +186,55 @@ public final class WitTypes {
                 }
                 yield sb.append('>').toString();
             }
+            case Stream st -> "WitStream<" + (st.element() == null ? "Void" : javaType(st.element(), true)) + ">";
+            case Future fu -> "WitPromise<" + (fu.payload() == null ? "Void" : javaType(fu.payload(), true)) + ">";
             case Alias a -> throw new IllegalStateException("Unresolved alias");
             case Unsupported u -> throw unsupported(u.what());
         };
+    }
+
+    /**
+     * The number of {@code stream} and {@code future} occurrences in the type, in the order used
+     * by {@code wasm-tools} to index the Canonical ABI built-ins (post-order: payload first).
+     */
+    public int asyncCount(TypeRef ref) {
+        if (ref == null || prim(ref) != null) {
+            return 0;
+        }
+        TypeDef def = def(ref);
+        return switch (def.kind) {
+            case Record r -> {
+                int n = 0;
+                for (Field f : r.fields()) {
+                    n += asyncCount(f.type());
+                }
+                yield n;
+            }
+            case Tuple t -> {
+                int n = 0;
+                for (TypeRef e : t.types()) {
+                    n += asyncCount(e);
+                }
+                yield n;
+            }
+            case Variant v -> {
+                int n = 0;
+                for (Case c : v.cases()) {
+                    n += asyncCount(c.type());
+                }
+                yield n;
+            }
+            case Option o -> asyncCount(o.type());
+            case Result r -> asyncCount(r.ok()) + asyncCount(r.err());
+            case ListKind l -> asyncCount(l.element());
+            case Stream st -> asyncCount(st.element()) + 1;
+            case Future fu -> asyncCount(fu.payload()) + 1;
+            default -> 0;
+        };
+    }
+
+    public boolean containsAsync(TypeRef ref) {
+        return asyncCount(ref) > 0;
     }
 
     public boolean isByteList(ListKind l) {
@@ -197,6 +294,8 @@ public final class WitTypes {
             case ListKind l -> 8;
             case Handle h -> 4;
             case Resource r -> 4;
+            case Stream st -> 4;
+            case Future fu -> 4;
             case Alias a -> throw new IllegalStateException("Unresolved alias");
             case Unsupported u -> throw unsupported(u.what());
         };
@@ -225,6 +324,8 @@ public final class WitTypes {
             case ListKind l -> 4;
             case Handle h -> 4;
             case Resource r -> 4;
+            case Stream st -> 4;
+            case Future fu -> 4;
             case Alias a -> throw new IllegalStateException("Unresolved alias");
             case Unsupported u -> throw unsupported(u.what());
         };
@@ -364,6 +465,8 @@ public final class WitTypes {
             }
             case Handle h -> out.add(Flat.I32);
             case Resource r -> out.add(Flat.I32);
+            case Stream st -> out.add(Flat.I32);
+            case Future fu -> out.add(Flat.I32);
             case Alias a -> throw new IllegalStateException("Unresolved alias");
             case Unsupported u -> throw unsupported(u.what());
         }

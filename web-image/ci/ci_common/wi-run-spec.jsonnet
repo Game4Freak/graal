@@ -152,6 +152,8 @@ local os_arch_jdk_mixin(mapping) = r.task_spec(r.evaluate_late({
 
   wabt: r.task_spec(common.wabt),
   binaryen: r.task_spec(common.binaryen),
+  wasm_tools: r.task_spec(common.wasm_tools),
+  wasmtime: r.task_spec(common.wasmtime),
 
   prettier: r.task_spec(common.gate_prettier),
   maven: r.task_spec(common.maven),

@@ -50,7 +50,15 @@ public final class WitModel {
     public record Id(int id) implements TypeRef {
     }
 
-    public sealed interface Kind permits Alias, Record, Variant, Enum, Flags, Option, Result, ListKind, Tuple, Resource, Handle, Unsupported {
+    public sealed interface Kind permits Alias, Record, Variant, Enum, Flags, Option, Result, ListKind, Tuple, Resource, Handle, Stream, Future, Unsupported {
+    }
+
+    /** {@code stream<T>}; the element type is null for {@code stream} without payload. */
+    public record Stream(TypeRef element) implements Kind {
+    }
+
+    /** {@code future<T>}; the payload type is null for {@code future} without payload. */
+    public record Future(TypeRef payload) implements Kind {
     }
 
     public record Alias(TypeRef target) implements Kind {
@@ -126,15 +134,18 @@ public final class WitModel {
     public static final class Function {
         public final String name;
         public final FunctionKind kind;
+        /** Declared as {@code async func}. */
+        public final boolean async;
         /** Resource type id for constructors, methods, and statics. */
         public final int resource;
         public final List<Param> params;
         /** Null if the function has no result. */
         public final TypeRef result;
 
-        Function(String name, FunctionKind kind, int resource, List<Param> params, TypeRef result) {
+        Function(String name, FunctionKind kind, boolean async, int resource, List<Param> params, TypeRef result) {
             this.name = name;
             this.kind = kind;
+            this.async = async;
             this.resource = resource;
             this.params = params;
             this.result = result;
@@ -344,6 +355,8 @@ public final class WitModel {
                 yield new Tuple(types);
             }
             case "resource" -> new Resource();
+            case "stream" -> new Stream(typeRef(value));
+            case "future" -> new Future(typeRef(value));
             case "handle" -> {
                 EconomicMap<String, Object> h = (EconomicMap<String, Object>) value;
                 boolean own = h.containsKey("own");
@@ -359,23 +372,30 @@ public final class WitModel {
         String name = (String) f.get("name");
         Object kindObj = f.get("kind");
         FunctionKind kind = FunctionKind.FREESTANDING;
+        boolean async = false;
         int resource = -1;
-        if (kindObj instanceof EconomicMap<?, ?> km) {
+        if (kindObj instanceof String ks) {
+            async = ks.startsWith("async-");
+        } else if (kindObj instanceof EconomicMap<?, ?> km) {
             String k = ((EconomicMap<String, Object>) km).getKeys().iterator().next();
+            if (k.startsWith("async-")) {
+                async = true;
+                k = k.substring("async-".length());
+            }
             kind = switch (k) {
                 case "constructor" -> FunctionKind.CONSTRUCTOR;
                 case "method" -> FunctionKind.METHOD;
                 case "static" -> FunctionKind.STATIC;
                 default -> FunctionKind.FREESTANDING;
             };
-            resource = toInt(((EconomicMap<String, Object>) km).get(k));
+            resource = toInt(((EconomicMap<String, Object>) km).get(k.equals("freestanding") ? k : (async ? "async-" + k : k)));
         }
         List<Param> params = new ArrayList<>();
         for (Object p : (List<Object>) f.get("params")) {
             EconomicMap<String, Object> pm = (EconomicMap<String, Object>) p;
             params.add(new Param((String) pm.get("name"), typeRef(pm.get("type"))));
         }
-        return new Function(name, kind, resource, params, typeRef(f.get("result")));
+        return new Function(name, kind, async, resource, params, typeRef(f.get("result")));
     }
 
     @SuppressWarnings("unchecked")

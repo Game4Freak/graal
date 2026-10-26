@@ -21,6 +21,10 @@ local tier4 = r.tier4;
     'unittest': mxgate('webimagebuild,webimageunittest') + t('30:00') + r.notify.base + r.node22 + platforms({
       'linux:amd64:jdk-latest': tier4,
     }),
+    // Runs the spec tests as WASI components under wasmtime (WASI target of the Wasm backend)
+    'wasitest': mxgate('webimagebuild,webimagewasitest') + t('45:00') + r.notify.wasm + r.node22 + r.binaryen + r.wasm_tools + r.wasmtime + platforms({
+      'linux:amd64:jdk-latest': daily,
+    }),
   },
   processed_tasks:: r.process(self.task_dict),
   builds: [

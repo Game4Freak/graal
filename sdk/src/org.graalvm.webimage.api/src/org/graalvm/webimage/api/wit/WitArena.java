@@ -109,6 +109,21 @@ public final class WitArena {
     }
 
     /**
+     * Closes the innermost scope without freeing its allocations and returns them, so that they
+     * can be freed later with {@link #freeAll(List)}.
+     */
+    public static List<Integer> detach() {
+        return SCOPES.remove(SCOPES.size() - 1);
+    }
+
+    public static void freeAll(List<Integer> allocations) {
+        for (int i = allocations.size() - 1; i >= 0; i--) {
+            WitMemory.free(allocations.get(i));
+        }
+        allocations.clear();
+    }
+
+    /**
      * Allocates memory that is freed when the innermost scope is popped.
      */
     public static int alloc(int size, int align) {

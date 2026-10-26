@@ -33,12 +33,14 @@ import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Case;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Enum;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Field;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Flags;
+import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Future;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Handle;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Kind;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.ListKind;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Option;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Record;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Resource;
+import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Stream;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Result;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.Tuple;
 import com.oracle.svm.hosted.webimage.wasi.bindgen.WitModel.TypeDef;
@@ -79,7 +81,7 @@ public final class AbiEmitter {
             return;
         }
         Kind kind = types.kind(ref);
-        if (kind instanceof Enum || kind instanceof Flags || kind instanceof Resource || kind instanceof Handle) {
+        if (kind instanceof Enum || kind instanceof Flags || kind instanceof Resource || kind instanceof Handle || kind instanceof Stream || kind instanceof Future) {
             // Handled inline
             return;
         }
@@ -94,12 +96,95 @@ public final class AbiEmitter {
         return "Abi." + prefix + "_" + types.helperName(ref);
     }
 
+    /** Extra arguments for helpers of types that contain streams or futures. */
+    private String asyncArgs(TypeRef ref, String ops, String base) {
+        return types.containsAsync(ref) ? ", " + ops + ", " + base : "";
+    }
+
+    /** Extra parameters for helpers of types that contain streams or futures. */
+    private String asyncParams(TypeRef ref) {
+        return types.containsAsync(ref) ? ", Object[] ops, int base" : "";
+    }
+
+    // Element codecs for streams and futures
+
+    private final Set<String> codecs = new LinkedHashSet<>();
+
+    /**
+     * Expression for the codec of a stream element or future payload type.
+     */
+    public String codecExpr(TypeRef ref) {
+        if (ref == null) {
+            return "WitElementCodec.UNIT";
+        }
+        String prim = types.prim(ref);
+        if ("u8".equals(prim) || "s8".equals(prim)) {
+            return "WitElementCodec.BYTE";
+        }
+        if (types.containsAsync(ref)) {
+            throw WitTypes.unsupported("streams or futures nested in stream elements");
+        }
+        String name = prim != null ? prim : types.helperName(ref);
+        if (codecs.add(name)) {
+            codecRefs.put(name, ref);
+            require(ref);
+        }
+        return "Abi.CODEC_" + name;
+    }
+
+    private void emitCodecs() {
+        // Codecs may require further codecs while being emitted, iterate over a snapshot each round
+        List<String> done = new ArrayList<>();
+        while (done.size() < codecs.size()) {
+            for (String name : new ArrayList<>(codecs)) {
+                if (done.contains(name)) {
+                    continue;
+                }
+                done.add(name);
+                TypeRef ref = codecRefs.get(name);
+                String javaType = types.javaType(ref, true);
+                w.open("static final WitElementCodec<" + javaType + "> CODEC_" + name + " = new WitElementCodec<>()");
+                w.line("@Override");
+                w.open("public int size()");
+                w.line("return " + types.size(ref) + ";");
+                w.close();
+                w.line();
+                w.line("@Override");
+                w.open("public int align()");
+                w.line("return " + types.align(ref) + ";");
+                w.close();
+                w.line();
+                w.line("@Override");
+                w.open("public void lower(" + javaType + " value, int address)");
+                w.line(lowerStmt(ref, "value", "address"));
+                w.close();
+                w.line();
+                w.line("@Override");
+                w.open("public " + javaType + " lift(int address)");
+                w.line("return " + liftExpr(ref, "address") + ";");
+                w.close();
+                w.close(";");
+                w.line();
+            }
+        }
+    }
+
+    private final java.util.Map<String, TypeRef> codecRefs = new java.util.HashMap<>();
+
     // Inline code for memory lowering and lifting
 
     /**
      * Statement(s) writing {@code value} of the given type to memory at {@code addr}.
      */
     public String lowerStmt(TypeRef ref, String value, String addr) {
+        return lowerStmt(ref, value, addr, "null", "0");
+    }
+
+    /**
+     * @param ops expression for the built-in table of the enclosing function
+     * @param base index of the first stream or future of this type in that table
+     */
+    public String lowerStmt(TypeRef ref, String value, String addr, String ops, String base) {
         String prim = types.prim(ref);
         if (prim != null) {
             return switch (prim) {
@@ -119,7 +204,7 @@ public final class AbiEmitter {
             return writeDiscriminant(((Enum) kind).cases().size(), value + ".ordinal()", addr);
         }
         if (kind instanceof Handle || kind instanceof Resource) {
-            return "WitMemory.writeInt(" + addr + ", " + value + ".handle());";
+            return "WitMemory.writeInt(" + addr + ", " + toHandle(ref, value) + ");";
         }
         if (kind instanceof Flags f) {
             String bits = value + ".toBits()";
@@ -129,13 +214,20 @@ public final class AbiEmitter {
                 default -> "WitMemory.writeInt(" + addr + ", " + bits + ");";
             };
         }
-        return helper("lower", ref) + "(" + value + ", " + addr + ");";
+        if (kind instanceof Stream || kind instanceof Future) {
+            return "WitMemory.writeInt(" + addr + ", " + value + ".transferReadable());";
+        }
+        return helper("lower", ref) + "(" + value + ", " + addr + asyncArgs(ref, ops, base) + ");";
     }
 
     /**
      * Expression reading a value of the given type from memory at {@code addr}.
      */
     public String liftExpr(TypeRef ref, String addr) {
+        return liftExpr(ref, addr, "null", "0");
+    }
+
+    public String liftExpr(TypeRef ref, String addr, String ops, String base) {
         String prim = types.prim(ref);
         if (prim != null) {
             return switch (prim) {
@@ -155,11 +247,8 @@ public final class AbiEmitter {
         if (kind instanceof Enum e) {
             return types.className(def) + ".values()[" + readDiscriminant(e.cases().size(), addr) + "]";
         }
-        if (kind instanceof Handle h) {
-            return "new " + types.className(types.model().type(h.resource())) + "(WitMemory.readInt(" + addr + "))";
-        }
-        if (kind instanceof Resource) {
-            return "new " + types.className(def) + "(WitMemory.readInt(" + addr + "))";
+        if (kind instanceof Handle || kind instanceof Resource) {
+            return fromHandle(ref, "WitMemory.readInt(" + addr + ")");
         }
         if (kind instanceof Flags f) {
             String bits = switch (WitTypes.flagsSize(f.flags().size())) {
@@ -169,7 +258,42 @@ public final class AbiEmitter {
             };
             return types.className(def) + ".fromBits(" + bits + ")";
         }
-        return helper("lift", ref) + "(" + addr + ")";
+        if (kind instanceof Stream st) {
+            return "WitStream.received((WitStreamOps) " + ops + "[" + base + " + " + types.asyncCount(st.element()) + "], " + codecExpr(st.element()) + ", WitMemory.readInt(" + addr + "))";
+        }
+        if (kind instanceof Future fu) {
+            return "WitPromise.received((WitFutureOps) " + ops + "[" + base + " + " + types.asyncCount(fu.payload()) + "], " + codecExpr(fu.payload()) + ", WitMemory.readInt(" + addr + "))";
+        }
+        return helper("lift", ref) + "(" + addr + asyncArgs(ref, ops, base) + ")";
+    }
+
+    /** The resource definition behind a handle or resource reference. */
+    private TypeDef resourceDef(TypeRef ref) {
+        TypeDef def = types.def(ref);
+        if (def.kind instanceof Handle h) {
+            return types.model().definition(new WitModel.Id(h.resource()));
+        }
+        return def;
+    }
+
+    /** Expression turning a Java resource value into a core handle. */
+    private String toHandle(TypeRef ref, String value) {
+        TypeDef res = resourceDef(ref);
+        String adapter = types.exportedResourceAdapter(res);
+        if (adapter != null) {
+            return adapter + ".toHandle" + types.className(res) + "(" + value + ")";
+        }
+        return value + ".handle()";
+    }
+
+    /** Expression turning a core handle into a Java resource value. */
+    private String fromHandle(TypeRef ref, String handle) {
+        TypeDef res = resourceDef(ref);
+        String adapter = types.exportedResourceAdapter(res);
+        if (adapter != null) {
+            return adapter + ".fromHandle" + types.className(res) + "(" + handle + ")";
+        }
+        return "new " + types.className(res) + "(" + handle + ")";
     }
 
     private static String writeDiscriminant(int cases, String value, String addr) {
@@ -194,6 +318,10 @@ public final class AbiEmitter {
      * Statement(s) storing the flat values of {@code value} into {@code f[off...]}.
      */
     public String flatLowerStmt(TypeRef ref, String value, String f, String off) {
+        return flatLowerStmt(ref, value, f, off, "null", "0");
+    }
+
+    public String flatLowerStmt(TypeRef ref, String value, String f, String off, String ops, String base) {
         String prim = types.prim(ref);
         if (prim != null) {
             return switch (prim) {
@@ -212,18 +340,25 @@ public final class AbiEmitter {
             return f + "[" + off + "] = " + value + ".ordinal();";
         }
         if (kind instanceof Handle || kind instanceof Resource) {
-            return f + "[" + off + "] = " + value + ".handle();";
+            return f + "[" + off + "] = " + toHandle(ref, value) + ";";
         }
         if (kind instanceof Flags) {
             return f + "[" + off + "] = " + value + ".toBits() & 0xFFFFFFFFL;";
         }
-        return helper("flatLower", ref) + "(" + value + ", " + f + ", " + off + ");";
+        if (kind instanceof Stream || kind instanceof Future) {
+            return f + "[" + off + "] = " + value + ".transferReadable();";
+        }
+        return helper("flatLower", ref) + "(" + value + ", " + f + ", " + off + asyncArgs(ref, ops, base) + ");";
     }
 
     /**
      * Expression building a value of the given type from the flat values {@code f[off...]}.
      */
     public String flatLiftExpr(TypeRef ref, String f, String off) {
+        return flatLiftExpr(ref, f, off, "null", "0");
+    }
+
+    public String flatLiftExpr(TypeRef ref, String f, String off, String ops, String base) {
         String prim = types.prim(ref);
         String slot = f + "[" + off + "]";
         if (prim != null) {
@@ -244,16 +379,19 @@ public final class AbiEmitter {
         if (kind instanceof Enum) {
             return types.className(def) + ".values()[(int) " + slot + "]";
         }
-        if (kind instanceof Handle h) {
-            return "new " + types.className(types.model().type(h.resource())) + "((int) " + slot + ")";
-        }
-        if (kind instanceof Resource) {
-            return "new " + types.className(def) + "((int) " + slot + ")";
+        if (kind instanceof Handle || kind instanceof Resource) {
+            return fromHandle(ref, "(int) " + slot);
         }
         if (kind instanceof Flags) {
             return types.className(def) + ".fromBits((int) " + slot + ")";
         }
-        return helper("flatLift", ref) + "(" + f + ", " + off + ")";
+        if (kind instanceof Stream st) {
+            return "WitStream.received((WitStreamOps) " + ops + "[" + base + " + " + types.asyncCount(st.element()) + "], " + codecExpr(st.element()) + ", (int) " + slot + ")";
+        }
+        if (kind instanceof Future fu) {
+            return "WitPromise.received((WitFutureOps) " + ops + "[" + base + " + " + types.asyncCount(fu.payload()) + "], " + codecExpr(fu.payload()) + ", (int) " + slot + ")";
+        }
+        return helper("flatLift", ref) + "(" + f + ", " + off + asyncArgs(ref, ops, base) + ")";
     }
 
     // Helper class generation
@@ -263,8 +401,13 @@ public final class AbiEmitter {
      */
     public String generate(String javaPackage, String header) {
         w.addImport("org.graalvm.webimage.api.wit.WitArena");
+        w.addImport("org.graalvm.webimage.api.wit.WitElementCodec");
+        w.addImport("org.graalvm.webimage.api.wit.WitFutureOps");
         w.addImport("org.graalvm.webimage.api.wit.WitMemory");
+        w.addImport("org.graalvm.webimage.api.wit.WitPromise");
         w.addImport("org.graalvm.webimage.api.wit.WitResult");
+        w.addImport("org.graalvm.webimage.api.wit.WitStream");
+        w.addImport("org.graalvm.webimage.api.wit.WitStreamOps");
         w.line("/**");
         w.line(" * Canonical ABI lowering and lifting helpers. Generated, do not edit.");
         w.line(" */");
@@ -278,6 +421,13 @@ public final class AbiEmitter {
         // Types may request further types while being emitted
         for (int i = 0; i < pending.size(); i++) {
             emitType(pending.get(i));
+        }
+        emitCodecs();
+        for (int i = 0; i < pending.size(); i++) {
+            // Codecs may have requested more types
+            if (!emittedHelpers.contains(types.helperName(pending.get(i)))) {
+                emitType(pending.get(i));
+            }
         }
         w.close();
         return w.toSource(javaPackage, header);
@@ -320,9 +470,14 @@ public final class AbiEmitter {
         w.line();
     }
 
+    private final Set<String> emittedHelpers = new LinkedHashSet<>();
+
     private void emitType(TypeRef ref) {
         TypeDef def = types.def(ref);
         String name = types.helperName(ref);
+        if (!emittedHelpers.add(name)) {
+            return;
+        }
         String javaType = types.javaType(ref, false);
         switch (def.kind) {
             case Record r -> emitRecordLike(name, javaType, WitTypes.fieldTypes(r.fields()), fieldAccessors(r.fields()), "new " + javaType + "(");
@@ -350,41 +505,59 @@ public final class AbiEmitter {
         return accessors;
     }
 
+    /** Base index expressions of the fields of a record-like type. */
+    private List<String> fieldBases(List<TypeRef> fieldTypes) {
+        List<String> bases = new ArrayList<>();
+        int n = 0;
+        for (TypeRef t : fieldTypes) {
+            bases.add("base + " + n);
+            n += t == null ? 0 : types.asyncCount(t);
+        }
+        return bases;
+    }
+
     private void emitRecordLike(String name, String javaType, List<TypeRef> fieldTypes, List<String> accessors, String constructorPrefix) {
         List<Integer> offsets = types.offsets(fieldTypes);
-        w.open("static void lower_" + name + "(" + javaType + " v, int addr)");
+        List<String> bases = fieldBases(fieldTypes);
+        String ap = "";
+        for (TypeRef t : fieldTypes) {
+            if (types.containsAsync(t)) {
+                ap = ", Object[] ops, int base";
+            }
+        }
+        w.open("static void lower_" + name + "(" + javaType + " v, int addr" + ap + ")");
         for (int i = 0; i < fieldTypes.size(); i++) {
-            w.line(lowerStmt(fieldTypes.get(i), "v." + accessors.get(i) + "()", "addr + " + offsets.get(i)));
+            w.line(lowerStmt(fieldTypes.get(i), "v." + accessors.get(i) + "()", "addr + " + offsets.get(i), "ops", bases.get(i)));
         }
         w.close();
         w.line();
-        w.open("static " + javaType + " lift_" + name + "(int addr)");
+        w.open("static " + javaType + " lift_" + name + "(int addr" + ap + ")");
         StringBuilder args = new StringBuilder();
         for (int i = 0; i < fieldTypes.size(); i++) {
             if (i > 0) {
                 args.append(", ");
             }
-            args.append(liftExpr(fieldTypes.get(i), "addr + " + offsets.get(i)));
+            args.append(liftExpr(fieldTypes.get(i), "addr + " + offsets.get(i), "ops", bases.get(i)));
         }
         w.line("return " + constructorPrefix + args + ");");
         w.close();
         w.line();
-        w.open("static void flatLower_" + name + "(" + javaType + " v, long[] f, int off)");
+        w.open("static void flatLower_" + name + "(" + javaType + " v, long[] f, int off" + ap + ")");
         int flatOffset = 0;
         for (int i = 0; i < fieldTypes.size(); i++) {
-            w.line(flatLowerStmt(fieldTypes.get(i), "v." + accessors.get(i) + "()", "f", "off + " + flatOffset));
+            w.line(flatLowerStmt(fieldTypes.get(i), "v." + accessors.get(i) + "()", "f", "off + " + flatOffset, "ops", bases.get(i)));
             flatOffset += types.flats(fieldTypes.get(i)).size();
         }
         w.close();
         w.line();
-        w.open("static " + javaType + " flatLift_" + name + "(long[] f, int off)");
+        w.open("static " + javaType + " flatLift_" + name + "(long[] f, int off" + ap + ")");
         args = new StringBuilder();
         flatOffset = 0;
         for (int i = 0; i < fieldTypes.size(); i++) {
             if (i > 0) {
                 args.append(", ");
             }
-            args.append(flatLiftExpr(fieldTypes.get(i), "f", "off + " + flatOffset));
+            args.append(flatLiftExpr(fieldTypes.get(i), "f", "off + " + flatOffset, "ops", bases.get(i)));
             flatOffset += types.flats(fieldTypes.get(i)).size();
         }
         w.line("return " + constructorPrefix + args + ");");
@@ -435,24 +608,31 @@ public final class AbiEmitter {
         int disc = cases.size();
         int payloadOffset = types.payloadOffset(payloads);
         List<Flat> joined = types.variantFlats(payloads);
+        List<String> bases = fieldBases(payloads);
+        String ap = "";
+        for (TypeRef t : payloads) {
+            if (t != null && types.containsAsync(t)) {
+                ap = ", Object[] ops, int base";
+            }
+        }
 
         // Memory lowering
-        w.open("static void lower_" + name + "(" + javaType + " v, int addr)");
+        w.open("static void lower_" + name + "(" + javaType + " v, int addr" + ap + ")");
         emitCaseDispatch(cases, instanceOfPattern, isSealed, (i, c, valueExpr) -> {
             w.line(writeDiscriminant(disc, String.valueOf(i), "addr"));
             if (c.payload() != null) {
-                w.line(lowerStmt(c.payload(), valueExpr, "addr + " + payloadOffset));
+                w.line(lowerStmt(c.payload(), valueExpr, "addr + " + payloadOffset, "ops", bases.get(i)));
             }
         });
         w.close();
         w.line();
 
         // Memory lifting
-        w.open("static " + javaType + " lift_" + name + "(int addr)");
+        w.open("static " + javaType + " lift_" + name + "(int addr" + ap + ")");
         w.open("switch (" + readDiscriminant(disc, "addr") + ")");
         for (int i = 0; i < cases.size(); i++) {
             VariantCase c = cases.get(i);
-            String value = c.payload() == null ? "" : liftExpr(c.payload(), "addr + " + payloadOffset);
+            String value = c.payload() == null ? "" : liftExpr(c.payload(), "addr + " + payloadOffset, "ops", bases.get(i));
             w.line("case " + i + ": return " + c.construct().replace("%s", value) + ";");
         }
         w.line("default: throw new IllegalStateException(\"Invalid discriminant\");");
@@ -461,14 +641,14 @@ public final class AbiEmitter {
         w.line();
 
         // Flat lowering
-        w.open("static void flatLower_" + name + "(" + javaType + " v, long[] f, int off)");
+        w.open("static void flatLower_" + name + "(" + javaType + " v, long[] f, int off" + ap + ")");
         w.line("java.util.Arrays.fill(f, off, off + " + joined.size() + ", 0L);");
         emitCaseDispatch(cases, instanceOfPattern, isSealed, (i, c, valueExpr) -> {
             w.line("f[off] = " + i + ";");
             if (c.payload() != null) {
                 List<Flat> caseFlats = types.flats(c.payload());
                 w.line("long[] cf = new long[" + caseFlats.size() + "];");
-                w.line(flatLowerStmt(c.payload(), valueExpr, "cf", "0"));
+                w.line(flatLowerStmt(c.payload(), valueExpr, "cf", "0", "ops", bases.get(i)));
                 for (int k = 0; k < caseFlats.size(); k++) {
                     Flat have = caseFlats.get(k);
                     Flat want = joined.get(k + 1);
@@ -481,11 +661,11 @@ public final class AbiEmitter {
         w.line();
 
         // Flat lifting
-        w.open("static " + javaType + " flatLift_" + name + "(long[] f, int off)");
+        w.open("static " + javaType + " flatLift_" + name + "(long[] f, int off" + ap + ")");
         w.open("switch ((int) f[off])");
         for (int i = 0; i < cases.size(); i++) {
             VariantCase c = cases.get(i);
-            String value = c.payload() == null ? "" : flatLiftExpr(c.payload(), "f", "off + 1");
+            String value = c.payload() == null ? "" : flatLiftExpr(c.payload(), "f", "off + 1", "ops", bases.get(i));
             w.line("case " + i + ": return " + c.construct().replace("%s", value) + ";");
         }
         w.line("default: throw new IllegalStateException(\"Invalid discriminant\");");
@@ -541,22 +721,23 @@ public final class AbiEmitter {
             TypeRef elem = l.element();
             int size = types.size(elem);
             int align = types.align(elem);
-            w.open("static void lower_" + name + "(" + javaType + " v, int addr)");
+            String ap = asyncParams(elem);
+            w.open("static void lower_" + name + "(" + javaType + " v, int addr" + ap + ")");
             w.line("int n = v.size();");
             w.line("int p = WitArena.alloc(Math.max(n * " + size + ", 1), " + align + ");");
             w.open("for (int i = 0; i < n; i++)");
-            w.line(lowerStmt(elem, "v.get(i)", "p + i * " + size));
+            w.line(lowerStmt(elem, "v.get(i)", "p + i * " + size, "ops", "base"));
             w.close();
             w.line("WitMemory.writeInt(addr, p);");
             w.line("WitMemory.writeInt(addr + 4, n);");
             w.close();
             w.line();
-            w.open("static " + javaType + " lift_" + name + "(int addr)");
+            w.open("static " + javaType + " lift_" + name + "(int addr" + ap + ")");
             w.line("int p = WitMemory.readInt(addr);");
             w.line("int n = WitMemory.readInt(addr + 4);");
             w.line(javaType + " result = new java.util.ArrayList<>(n);");
             w.open("for (int i = 0; i < n; i++)");
-            w.line("result.add(" + liftExpr(elem, "p + i * " + size) + ");");
+            w.line("result.add(" + liftExpr(elem, "p + i * " + size, "ops", "base") + ");");
             w.close();
             w.line("WitArena.deferFree(p);");
             w.line("return result;");
@@ -564,18 +745,20 @@ public final class AbiEmitter {
             w.line();
         }
         // Flat form: pointer and length
-        w.open("static void flatLower_" + name + "(" + javaType + " v, long[] f, int off)");
+        String ap = asyncParams(l.element());
+        String aa = types.containsAsync(l.element()) ? ", ops, base" : "";
+        w.open("static void flatLower_" + name + "(" + javaType + " v, long[] f, int off" + ap + ")");
         w.line("int tmp = WitArena.alloc(8, 4);");
-        w.line("lower_" + name + "(v, tmp);");
+        w.line("lower_" + name + "(v, tmp" + aa + ");");
         w.line("f[off] = WitMemory.readInt(tmp);");
         w.line("f[off + 1] = WitMemory.readInt(tmp + 4);");
         w.close();
         w.line();
-        w.open("static " + javaType + " flatLift_" + name + "(long[] f, int off)");
+        w.open("static " + javaType + " flatLift_" + name + "(long[] f, int off" + ap + ")");
         w.line("int tmp = WitArena.alloc(8, 4);");
         w.line("WitMemory.writeInt(tmp, (int) f[off]);");
         w.line("WitMemory.writeInt(tmp + 4, (int) f[off + 1]);");
-        w.line("return lift_" + name + "(tmp);");
+        w.line("return lift_" + name + "(tmp" + aa + ");");
         w.close();
         w.line();
     }

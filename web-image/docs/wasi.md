@@ -22,14 +22,14 @@ In addition to the [prerequisites of Web Image](get-started.md#prerequisites), t
 
 ## Building
 
-Select the target with the `WASI` backend of the `svm-wasm` tool:
+Build with the `svm-wasi` tool:
 
 ```shell
-native-image --tool:svm-wasm -H:+UnlockExperimentalVMOptions -H:Backend=WASI -cp . HelloWasi
+native-image --tool:svm-wasi -cp . HelloWasi
 ```
 
-The `--tool:svm-wasm` option must come first.
-In a GraalVM source build, the `web-image` launcher accepts the same backend option:
+The `--tool:svm-wasi` option must come first.
+In a GraalVM source build, the `web-image` launcher can select the same target with a backend option:
 
 ```shell
 web-image -H:Backend=WASI -cp . HelloWasi
@@ -103,14 +103,22 @@ The generator produces one Java interface per exported WIT interface (`Calculate
 Implement the interface and register the implementation in `META-INF/services/docs.calc.Calculate` (or call `CalculateExports.setImplementation`), then build with the world selected:
 
 ```shell
-native-image --tool:svm-wasm -H:+UnlockExperimentalVMOptions -H:Backend=WASI -H:WitDirectory=wit -H:WitWorld=docs:calc/calculator -cp . Main
+native-image --tool:svm-wasi -H:+UnlockExperimentalVMOptions -H:WitDirectory=wit -H:WitWorld=docs:calc/calculator -cp . Main
 wasmtime run --invoke 'add(2, 40)' main.wasm
 ```
 
 Exported functions can be called before `main` runs; the runtime initializes itself on the first call.
 Low-level bindings can also be written by hand with `@WitImport`, `@WitExport`, and `WitMemory` from `org.graalvm.webimage.api.wit`.
 
-Not supported yet: exported resources, `stream`, `future`, and `async` functions, and flags with more than 32 fields.
+WIT `async func` imports return a `WitFuture<T>`; call `join()` on it from synchronous code, or chain continuations with `thenApply` and `thenCompose`.
+Exported `async func` functions are declared as returning `WitFuture<T>` in the generated Java interface; the host is notified when the future completes, so the implementation must not block and should compose futures instead.
+
+`stream<T>` values are `WitStream<T>` and `future<T>` values are `WitPromise<T>`: streams received from the host are read with `read(max)` or `readBytes(max)`, streams passed to the host are created with the generated `create<Function>Stream<N>()` factory, written, and closed.
+Generate the WASI interfaces too with `--include-wasi` to use, for example, `wasi:cli/stdout#write-via-stream` directly.
+
+Exported resources become Java interfaces; their constructors and static functions are methods of the exported interface (`newCounter`, `counterGet`).
+
+Not supported yet: cancellation, `error-context`, and flags with more than 32 fields.
 
 ## Limitations
 

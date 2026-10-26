@@ -71,6 +71,33 @@ local node_map = {
     ],
   },
 
+  // wasm-tools turns the core module of the WASI target into a component.
+  // The download artifact must provide the release archive of https://github.com/bytecodealliance/wasm-tools.
+  wasm_tools: {
+    downloads+: {
+      WASM_TOOLS_DIR: { name: 'wasm-tools', version: '1.262.0', platformspecific: true },
+    },
+    setup+: [
+      $.prepend_path('$WASM_TOOLS_DIR', self.os),
+      ['wasm-tools', '--version'],
+    ],
+  },
+
+  // wasmtime runs the WASI components produced by the WASI target in tests.
+  // The download artifact must provide the release archive of https://github.com/bytecodealliance/wasmtime (46 or later).
+  wasmtime: {
+    downloads+: {
+      WASMTIME_DIR: { name: 'wasmtime', version: '50.0.0', platformspecific: true },
+    },
+    setup+: [
+      $.prepend_path('$WASMTIME_DIR', self.os),
+      ['wasmtime', '--version'],
+    ],
+    environment+: {
+      WASMTIME_EXE: 'wasmtime',
+    },
+  },
+
   maven: {
     packages+: {
       maven: '==3.9.10',

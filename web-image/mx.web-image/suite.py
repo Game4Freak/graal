@@ -322,6 +322,14 @@ suite = {
                 "native-image.properties": "dependency:svm-wasm-macro-builder/native-image.properties",
             },
         },
+        "NATIVE_IMAGE_WASI_SUPPORT": {
+            "native": True,
+            "description": "Macro for the Native Image WASI target",
+            "dependencies": ["svm-wasi-macro-builder"],
+            "layout": {
+                "native-image.properties": "dependency:svm-wasi-macro-builder/native-image.properties",
+            },
+        },
         "WEBIMAGE_LIBRARY_SUPPORT": {
             "subDir": "src",
             "dependencies": [

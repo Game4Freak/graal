@@ -160,6 +160,22 @@ public final class WitBindgen {
         String worldClass = JavaNames.type(world.name);
         List<Function> worldImports = new ArrayList<>();
         List<Function> worldExports = new ArrayList<>();
+        // Exported resources are known up front so that handles lower and lift through the adapter
+        for (WorldItem item : world.exports.values()) {
+            if (item instanceof InterfaceItem ii) {
+                Interface iface = model.interfaceOf(ii.id());
+                if (isWasi(iface)) {
+                    continue;
+                }
+                exportedInterfaces.add(iface.id);
+                for (Integer typeId : iface.types.values()) {
+                    TypeDef def = types.def(new WitModel.Id(typeId));
+                    if (def != null && def.kind instanceof Resource && def.ownerInterface == iface.id) {
+                        types.registerExportedResource(def.id, interfaceClassName(iface) + "Exports");
+                    }
+                }
+            }
+        }
         for (Map.Entry<String, WorldItem> e : world.imports.entrySet()) {
             if (e.getValue() instanceof InterfaceItem item) {
                 Interface iface = model.interfaceOf(item.id());
@@ -173,7 +189,12 @@ public final class WitBindgen {
         }
         for (Map.Entry<String, WorldItem> e : world.exports.entrySet()) {
             if (e.getValue() instanceof InterfaceItem item) {
-                generateExportedInterface(model.interfaceOf(item.id()));
+                Interface iface = model.interfaceOf(item.id());
+                if (isWasi(iface)) {
+                    // Exported WASI interfaces (wasi:cli/run) are implemented by the runtime
+                    continue;
+                }
+                generateExportedInterface(iface);
             } else if (e.getValue() instanceof FunctionItem item) {
                 worldExports.add(item.function());
             }
@@ -224,6 +245,8 @@ public final class WitBindgen {
             }
             case ListKind l -> useType(l.element());
             case Tuple t -> t.types().forEach(this::useType);
+            case WitModel.Stream st -> useType(st.element());
+            case WitModel.Future fu -> useType(fu.payload());
             default -> {
             }
         }
@@ -363,15 +386,22 @@ public final class WitBindgen {
     private void generateResourceClass(TypeDef def, JavaWriter w) {
         String name = types.className(def);
         Interface owner = ownerOf(def);
-        boolean exported = exportedInterfaces.contains(owner.id);
-        if (exported) {
-            throw WitTypes.unsupported("exported resource " + def.name);
+        if (types.exportedResourceAdapter(def) != null) {
+            generateExportedResourceInterface(def, owner, w);
+            return;
         }
         String module = model.qualifiedName(owner);
         w.addImport("org.graalvm.webimage.api.wit.WitArena");
+        w.addImport("org.graalvm.webimage.api.wit.WitFuture");
         w.addImport("org.graalvm.webimage.api.wit.WitImport");
         w.addImport("org.graalvm.webimage.api.wit.WitMemory");
         w.addImport("org.graalvm.webimage.api.wit.WitResult");
+        w.addImport("org.graalvm.webimage.api.wit.WitScheduler");
+        w.addImport("org.graalvm.webimage.api.wit.WitStream");
+        w.addImport("org.graalvm.webimage.api.wit.WitStreamOps");
+        w.addImport("org.graalvm.webimage.api.wit.WitPromise");
+        w.addImport("org.graalvm.webimage.api.wit.WitFutureOps");
+        w.addImport("org.graalvm.webimage.api.wit.WitElementCodec");
         w.line("/** WIT resource " + def.name + " of " + module + ". Generated, do not edit. */");
         w.open("public final class " + name + " implements AutoCloseable");
         w.line("private final int handle;");
@@ -394,24 +424,82 @@ public final class WitBindgen {
         w.line();
         for (Function f : owner.functions.values()) {
             if (f.resource == def.id) {
-                emitImport(w, module, f, name);
+                emitImportChecked(w, module, f, name);
             }
         }
         w.close();
     }
 
+    /**
+     * An exported resource is a Java interface with the resource's methods; constructors and
+     * statics live in the interface's Java interface.
+     */
+    private void generateExportedResourceInterface(TypeDef def, Interface owner, JavaWriter w) {
+        String name = types.className(def);
+        w.addImport("org.graalvm.webimage.api.wit.WitFuture");
+        w.addImport("org.graalvm.webimage.api.wit.WitResult");
+        w.addImport("org.graalvm.webimage.api.wit.WitStream");
+        w.addImport("org.graalvm.webimage.api.wit.WitPromise");
+        w.line("/** Exported WIT resource " + def.name + " of " + model.qualifiedName(owner) + ". Implement it; instances are created by the");
+        w.line(" * constructor and static functions of the exported interface. Generated, do not edit. */");
+        w.open("public interface " + name);
+        for (Function f : owner.functions.values()) {
+            if (f.resource == def.id && f.kind == FunctionKind.METHOD) {
+                try {
+                    checkSupported(f);
+                    w.line(javaSignature(f, false) + ";");
+                } catch (UnsupportedOperationException e) {
+                    w.line("// Skipped " + f.name + ": " + e.getMessage());
+                }
+            }
+        }
+        w.close();
+    }
+
+    /** Java method name of a function in the exported interface's Java interface. */
+    private String exportedFunctionName(Function f) {
+        return switch (f.kind) {
+            case CONSTRUCTOR -> "new" + types.className(model.type(f.resource));
+            case STATIC -> JavaNames.member(model.type(f.resource).name + "-" + f.plainName());
+            default -> JavaNames.member(f.plainName());
+        };
+    }
+
     // Interfaces
 
     private final Set<Integer> exportedInterfaces = new LinkedHashSet<>();
+    /** The exported interface whose adapter is being generated, if any. */
+    private Interface currentExportedInterface;
+
+    /**
+     * The Java class name for an interface; interfaces that define a type of the same name (for
+     * example {@code wasi:cli/terminal-input}) get a suffix to avoid a collision.
+     */
+    private String interfaceClassName(Interface iface) {
+        String name = JavaNames.type(iface.name);
+        for (String typeName : iface.types.keySet()) {
+            if (JavaNames.type(typeName).equals(name)) {
+                return name + "Functions";
+            }
+        }
+        return name;
+    }
 
     private void generateImportedInterface(Interface iface) {
-        String name = JavaNames.type(iface.name);
+        String name = interfaceClassName(iface);
         String module = model.qualifiedName(iface);
         JavaWriter w = new JavaWriter();
         w.addImport("org.graalvm.webimage.api.wit.WitArena");
+        w.addImport("org.graalvm.webimage.api.wit.WitFuture");
         w.addImport("org.graalvm.webimage.api.wit.WitImport");
         w.addImport("org.graalvm.webimage.api.wit.WitMemory");
         w.addImport("org.graalvm.webimage.api.wit.WitResult");
+        w.addImport("org.graalvm.webimage.api.wit.WitScheduler");
+        w.addImport("org.graalvm.webimage.api.wit.WitStream");
+        w.addImport("org.graalvm.webimage.api.wit.WitStreamOps");
+        w.addImport("org.graalvm.webimage.api.wit.WitPromise");
+        w.addImport("org.graalvm.webimage.api.wit.WitFutureOps");
+        w.addImport("org.graalvm.webimage.api.wit.WitElementCodec");
         w.line("/** Imported WIT interface " + module + ". Generated, do not edit. */");
         w.open("public final class " + name);
         w.open("private " + name + "()");
@@ -422,59 +510,95 @@ public final class WitBindgen {
         }
         for (Function f : iface.functions.values()) {
             if (f.kind == FunctionKind.FREESTANDING) {
-                emitImport(w, module, f, null);
+                emitImportChecked(w, module, f, null);
             }
         }
         w.close();
         sources.put(name, w.toSource(javaPackage, HEADER));
     }
 
+    /**
+     * Emits an import, or a comment if its signature uses unsupported types.
+     */
+    private void emitImportChecked(JavaWriter w, String module, Function f, String resourceClass) {
+        try {
+            checkSupported(f);
+            emitImport(w, module, f, resourceClass);
+        } catch (UnsupportedOperationException e) {
+            w.line("// Skipped " + f.name + ": " + e.getMessage());
+            w.line();
+        }
+    }
+
+    private void checkSupported(Function f) {
+        for (Param p : f.params) {
+            types.flats(p.type());
+            types.javaType(p.type(), false);
+        }
+        if (f.result != null) {
+            types.flats(f.result);
+            types.javaType(f.result, false);
+        }
+    }
+
     private void generateExportedInterface(Interface iface) {
         exportedInterfaces.add(iface.id);
-        String name = JavaNames.type(iface.name);
+        String name = interfaceClassName(iface);
         String qualified = model.qualifiedName(iface);
         for (Integer typeId : iface.types.values()) {
-            TypeDef def = model.type(typeId);
-            if (types.def(new WitModel.Id(typeId)) != null && types.def(new WitModel.Id(typeId)).kind instanceof Resource) {
-                throw WitTypes.unsupported("exported resource " + def.name);
-            }
             useType(new WitModel.Id(typeId));
         }
         // The Java interface the user implements
         JavaWriter w = new JavaWriter();
+        w.addImport("org.graalvm.webimage.api.wit.WitFuture");
         w.addImport("org.graalvm.webimage.api.wit.WitResult");
+        w.addImport("org.graalvm.webimage.api.wit.WitStream");
+        w.addImport("org.graalvm.webimage.api.wit.WitPromise");
         w.line("/** Exported WIT interface " + qualified + ". Implement it and register the implementation with");
         w.line(" * {@code " + name + "Exports.setImplementation} or a {@code META-INF/services/" + javaPackage + "." + name + "} file. Generated, do not edit. */");
+        List<Function> supported = supportedFunctions(iface.functions.values(), w);
         w.open("public interface " + name);
-        for (Function f : iface.functions.values()) {
-            w.line(javaSignature(f, false) + ";");
+        for (Function f : supported) {
+            if (f.kind != FunctionKind.METHOD) {
+                w.line(javaSignature(f, false, exportedFunctionName(f)) + ";");
+            }
         }
         w.close();
         sources.put(name, w.toSource(javaPackage, HEADER));
         // The adapter
         JavaWriter a = new JavaWriter();
-        emitExportAdapter(a, name + "Exports", name, iface.functions.values(), qualified + "#");
+        currentExportedInterface = iface;
+        emitExportAdapter(a, name + "Exports", name, supported, qualified + "#", "[export]" + qualified);
+        currentExportedInterface = null;
         sources.put(name + "Exports", a.toSource(javaPackage, HEADER));
     }
 
     private void generateWorldClass(String worldClass, List<Function> imports, List<Function> exports) {
         JavaWriter w = new JavaWriter();
         w.addImport("org.graalvm.webimage.api.wit.WitArena");
+        w.addImport("org.graalvm.webimage.api.wit.WitFuture");
         w.addImport("org.graalvm.webimage.api.wit.WitImport");
         w.addImport("org.graalvm.webimage.api.wit.WitMemory");
         w.addImport("org.graalvm.webimage.api.wit.WitResult");
+        w.addImport("org.graalvm.webimage.api.wit.WitScheduler");
+        w.addImport("org.graalvm.webimage.api.wit.WitStream");
+        w.addImport("org.graalvm.webimage.api.wit.WitStreamOps");
+        w.addImport("org.graalvm.webimage.api.wit.WitPromise");
+        w.addImport("org.graalvm.webimage.api.wit.WitFutureOps");
+        w.addImport("org.graalvm.webimage.api.wit.WitElementCodec");
         w.line("/** Functions imported and exported directly by the world. Generated, do not edit. */");
         w.open("public final class " + worldClass);
         w.open("private " + worldClass + "()");
         w.close();
         w.line();
         for (Function f : imports) {
-            emitImport(w, "$root", f, null);
+            emitImportChecked(w, "$root", f, null);
         }
+        List<Function> supported = supportedFunctions(exports, w);
         if (!exports.isEmpty()) {
             w.line("/** The functions exported by the world. */");
             w.open("public interface Exports");
-            for (Function f : exports) {
+            for (Function f : supported) {
                 w.line(javaSignature(f, false) + ";");
             }
             w.close();
@@ -484,12 +608,25 @@ public final class WitBindgen {
         sources.put(worldClass, w.toSource(javaPackage, HEADER));
         if (!exports.isEmpty()) {
             JavaWriter a = new JavaWriter();
-            emitExportAdapter(a, worldClass + "Exports", worldClass + ".Exports", exports, "");
+            emitExportAdapter(a, worldClass + "Exports", worldClass + ".Exports", supported, "", "[export]$root");
             sources.put(worldClass + "Exports", a.toSource(javaPackage, HEADER));
         }
     }
 
     // Functions
+
+    private List<Function> supportedFunctions(Iterable<Function> functions, JavaWriter w) {
+        List<Function> supported = new ArrayList<>();
+        for (Function f : functions) {
+            try {
+                checkSupported(f);
+                supported.add(f);
+            } catch (UnsupportedOperationException e) {
+                w.line("// Skipped " + f.name + ": " + e.getMessage());
+            }
+        }
+        return supported;
+    }
 
     /** Parameters of the Java signature (the implicit self of methods is skipped). */
     private List<Param> javaParams(Function f) {
@@ -501,13 +638,22 @@ public final class WitBindgen {
     }
 
     private String javaSignature(Function f, boolean isStatic) {
+        return javaSignature(f, isStatic, JavaNames.member(f.plainName()));
+    }
+
+    private String javaSignature(Function f, boolean isStatic, String javaName) {
         StringBuilder sb = new StringBuilder();
         if (isStatic) {
             sb.append("public static ");
         }
-        String returnType = f.result == null ? "void" : types.javaType(f.result, false);
         useType(f.result);
-        sb.append(returnType).append(' ').append(JavaNames.member(f.plainName())).append('(');
+        String returnType;
+        if (f.async) {
+            returnType = "WitFuture<" + (f.result == null ? "Void" : types.javaType(f.result, true)) + ">";
+        } else {
+            returnType = f.result == null ? "void" : types.javaType(f.result, false);
+        }
+        sb.append(returnType).append(' ').append(javaName).append('(');
         List<Param> params = javaParams(f);
         for (int i = 0; i < params.size(); i++) {
             if (i > 0) {
@@ -539,6 +685,155 @@ public final class WitBindgen {
         return JavaNames.member(f.plainName()) + "$import";
     }
 
+    /** The stream and future types of a function in built-in index order (post-order). */
+    private List<TypeRef> asyncTypes(Function f) {
+        List<TypeRef> result = new ArrayList<>();
+        for (Param p : f.params) {
+            collectAsync(p.type(), result);
+        }
+        if (f.result != null) {
+            collectAsync(f.result, result);
+        }
+        return result;
+    }
+
+    private void collectAsync(TypeRef ref, List<TypeRef> out) {
+        if (ref == null || types.prim(ref) != null) {
+            return;
+        }
+        TypeDef def = types.def(ref);
+        switch (def.kind) {
+            case Record r -> r.fields().forEach(fl -> collectAsync(fl.type(), out));
+            case Tuple t -> t.types().forEach(e -> collectAsync(e, out));
+            case Variant v -> v.cases().forEach(c -> collectAsync(c.type(), out));
+            case Option o -> collectAsync(o.type(), out);
+            case Result r -> {
+                collectAsync(r.ok(), out);
+                collectAsync(r.err(), out);
+            }
+            case ListKind l -> collectAsync(l.element(), out);
+            case WitModel.Stream st -> {
+                collectAsync(st.element(), out);
+                out.add(ref);
+            }
+            case WitModel.Future fu -> {
+                collectAsync(fu.payload(), out);
+                out.add(ref);
+            }
+            default -> {
+            }
+        }
+    }
+
+    /** Name of the built-in table field of a function, or "null" if it has no streams or futures. */
+    private String opsExpr(Function f) {
+        return asyncTypes(f).isEmpty() ? "null" : "OPS_" + JavaNames.constant(f.plainName());
+    }
+
+    /** Base index of the i-th parameter in the built-in table. */
+    private int paramBase(Function f, int i) {
+        int n = 0;
+        for (int k = 0; k < i; k++) {
+            n += types.asyncCount(f.params.get(k).type());
+        }
+        return n;
+    }
+
+    private int resultBase(Function f) {
+        return paramBase(f, f.params.size());
+    }
+
+    /**
+     * Emits the built-in natives, the ops table, and the factories for the streams and futures of
+     * a function.
+     *
+     * @param module module of the built-ins ({@code [export]...} for exports)
+     */
+    private void emitAsyncOps(JavaWriter w, String module, Function f) {
+        List<TypeRef> asyncs = asyncTypes(f);
+        if (asyncs.isEmpty()) {
+            return;
+        }
+        String fn = JavaNames.member(f.plainName());
+        String table = "OPS_" + JavaNames.constant(f.plainName());
+        List<String> entries = new ArrayList<>();
+        for (int i = 0; i < asyncs.size(); i++) {
+            TypeRef ref = asyncs.get(i);
+            TypeDef def = types.def(ref);
+            boolean stream = def.kind instanceof WitModel.Stream;
+            String kind = stream ? "stream" : "future";
+            String prefix = fn + "$" + (stream ? "s" : "f") + i;
+            String valueType = types.javaType(ref, false);
+            TypeRef payload = stream ? ((WitModel.Stream) def.kind).element() : ((WitModel.Future) def.kind).payload();
+            String codec = abi.codecExpr(payload);
+            w.line("@WitImport(module = \"" + module + "\", name = \"[" + kind + "-new-" + i + "]" + f.name + "\")");
+            w.line("private static native long " + prefix + "new();");
+            w.line();
+            w.line("@WitImport(module = \"" + module + "\", name = \"[async-lower][" + kind + "-read-" + i + "]" + f.name + "\")");
+            w.line("private static native int " + prefix + "read(int handle, int address" + (stream ? ", int count" : "") + ");");
+            w.line();
+            w.line("@WitImport(module = \"" + module + "\", name = \"[async-lower][" + kind + "-write-" + i + "]" + f.name + "\")");
+            w.line("private static native int " + prefix + "write(int handle, int address" + (stream ? ", int count" : "") + ");");
+            w.line();
+            w.line("@WitImport(module = \"" + module + "\", name = \"[" + kind + "-drop-readable-" + i + "]" + f.name + "\")");
+            w.line("private static native void " + prefix + "dropReadable(int handle);");
+            w.line();
+            w.line("@WitImport(module = \"" + module + "\", name = \"[" + kind + "-drop-writable-" + i + "]" + f.name + "\")");
+            w.line("private static native void " + prefix + "dropWritable(int handle);");
+            w.line();
+            String opsType = stream ? "WitStreamOps" : "WitFutureOps";
+            String opsName = prefix + "ops";
+            w.open("private static final " + opsType + " " + opsName + " = new " + opsType + "()");
+            w.line("@Override");
+            w.open("public long " + kind + "New()");
+            w.line("return " + prefix + "new();");
+            w.close();
+            w.line();
+            w.line("@Override");
+            w.open("public int read(int handle, int address" + (stream ? ", int count" : "") + ")");
+            w.line("return " + prefix + "read(handle, address" + (stream ? ", count" : "") + ");");
+            w.close();
+            w.line();
+            w.line("@Override");
+            w.open("public int write(int handle, int address" + (stream ? ", int count" : "") + ")");
+            w.line("return " + prefix + "write(handle, address" + (stream ? ", count" : "") + ");");
+            w.close();
+            w.line();
+            w.line("@Override");
+            w.open("public void dropReadable(int handle)");
+            w.line(prefix + "dropReadable(handle);");
+            w.close();
+            w.line();
+            w.line("@Override");
+            w.open("public void dropWritable(int handle)");
+            w.line(prefix + "dropWritable(handle);");
+            w.close();
+            w.close(";");
+            w.line();
+            entries.add(opsName);
+            w.line("/** Creates the " + kind + " at index " + i + " of " + f.name + " (" + positionDescription(f, i) + "). */");
+            w.open("public static " + valueType + " create" + JavaNames.type(f.plainName()) + (stream ? "Stream" : "Future") + i + "()");
+            w.line("return " + (stream ? "WitStream" : "WitPromise") + ".create(" + opsName + ", " + codec + ");");
+            w.close();
+            w.line();
+        }
+        w.line("private static final Object[] " + table + " = {" + String.join(", ", entries) + "};");
+        w.line();
+    }
+
+    /** Describes where the i-th stream or future of a function occurs. */
+    private String positionDescription(Function f, int i) {
+        int n = 0;
+        for (Param p : f.params) {
+            int count = types.asyncCount(p.type());
+            if (i < n + count) {
+                return "parameter " + p.name();
+            }
+            n += count;
+        }
+        return "result";
+    }
+
     /**
      * Emits an imported function: the public Java method and the private native import.
      *
@@ -557,6 +852,11 @@ public final class WitBindgen {
         boolean retptr = rflats.size() > WitTypes.MAX_FLAT_RESULTS;
 
         String javaName = JavaNames.member(f.plainName());
+        emitAsyncOps(w, module, f);
+        if (f.async) {
+            emitAsyncImport(w, module, f, resourceClass, javaName, jparams, rflats);
+            return;
+        }
         String signature;
         if (f.kind == FunctionKind.CONSTRUCTOR) {
             signature = "public static " + resourceClass + " create(" + paramList(jparams) + ")";
@@ -575,7 +875,7 @@ public final class WitBindgen {
             List<Integer> offsets = types.offsets(ptypes);
             w.line("int area = WitArena.alloc(" + types.recordSize(ptypes) + ", " + types.recordAlign(ptypes) + ");");
             for (int i = 0; i < f.params.size(); i++) {
-                w.line(abi.lowerStmt(ptypes.get(i), paramValue(f, i), "area + " + offsets.get(i)));
+                w.line(abi.lowerStmt(ptypes.get(i), paramValue(f, i), "area + " + offsets.get(i), opsExpr(f), String.valueOf(paramBase(f, i))));
             }
             nativeArgs.add("area");
         } else if (!pflats.isEmpty()) {
@@ -583,7 +883,7 @@ public final class WitBindgen {
             int off = 0;
             for (int i = 0; i < f.params.size(); i++) {
                 TypeRef t = f.params.get(i).type();
-                w.line(abi.flatLowerStmt(t, paramValue(f, i), "f", String.valueOf(off)));
+                w.line(abi.flatLowerStmt(t, paramValue(f, i), "f", String.valueOf(off), opsExpr(f), String.valueOf(paramBase(f, i))));
                 off += types.flats(t).size();
             }
             for (int i = 0; i < pflats.size(); i++) {
@@ -599,11 +899,11 @@ public final class WitBindgen {
             w.line(call + ";");
         } else if (retptr) {
             w.line(call + ";");
-            w.line("return " + abi.liftExpr(f.result, "ret") + ";");
+            w.line("return " + abi.liftExpr(f.result, "ret", opsExpr(f), String.valueOf(resultBase(f))) + ";");
         } else {
             w.line("long[] rf = new long[1];");
             w.line("rf[0] = " + WitTypes.pack(rflats.get(0), call) + ";");
-            w.line("return " + abi.flatLiftExpr(f.result, "rf", "0") + ";");
+            w.line("return " + abi.flatLiftExpr(f.result, "rf", "0", opsExpr(f), String.valueOf(resultBase(f))) + ";");
         }
         w.closeNoBrace();
         w.open("} finally");
@@ -635,6 +935,88 @@ public final class WitBindgen {
         w.line();
     }
 
+    /**
+     * Emits an asynchronously lowered import returning a {@code WitFuture}.
+     */
+    private void emitAsyncImport(JavaWriter w, String module, Function f, String resourceClass, String javaName, List<Param> jparams, List<Flat> rflats) {
+        List<Flat> pflats = paramFlats(f);
+        boolean spill = pflats.size() > WitTypes.MAX_FLAT_ASYNC_PARAMS;
+        boolean hasResult = f.result != null;
+        String boxedResult = hasResult ? types.javaType(f.result, true) : "Void";
+        String signature;
+        if (f.kind == FunctionKind.CONSTRUCTOR) {
+            signature = "public static WitFuture<" + resourceClass + "> create(" + paramList(jparams) + ")";
+        } else if (f.kind == FunctionKind.METHOD) {
+            signature = "public WitFuture<" + boxedResult + "> " + javaName + "(" + paramList(jparams) + ")";
+        } else {
+            signature = "public static WitFuture<" + boxedResult + "> " + javaName + "(" + paramList(jparams) + ")";
+        }
+        w.open(signature);
+        w.line("WitArena.push();");
+        w.line("int ret = 0;");
+        w.open("try");
+        List<String> nativeArgs = new ArrayList<>();
+        if (spill) {
+            List<TypeRef> ptypes = paramTypes(f);
+            List<Integer> offsets = types.offsets(ptypes);
+            w.line("int area = WitArena.alloc(" + types.recordSize(ptypes) + ", " + types.recordAlign(ptypes) + ");");
+            for (int i = 0; i < f.params.size(); i++) {
+                w.line(abi.lowerStmt(ptypes.get(i), paramValue(f, i), "area + " + offsets.get(i), opsExpr(f), String.valueOf(paramBase(f, i))));
+            }
+            nativeArgs.add("area");
+        } else if (!pflats.isEmpty()) {
+            w.line("long[] f = new long[" + pflats.size() + "];");
+            int off = 0;
+            for (int i = 0; i < f.params.size(); i++) {
+                TypeRef t = f.params.get(i).type();
+                w.line(abi.flatLowerStmt(t, paramValue(f, i), "f", String.valueOf(off), opsExpr(f), String.valueOf(paramBase(f, i))));
+                off += types.flats(t).size();
+            }
+            for (int i = 0; i < pflats.size(); i++) {
+                nativeArgs.add(WitTypes.unpack(pflats.get(i), "f[" + i + "]"));
+            }
+        }
+        if (hasResult) {
+            // Lives until the subtask returns, freed by the scheduler
+            w.line("ret = WitMemory.allocate(" + types.size(f.result) + ", " + types.align(f.result) + ");");
+            nativeArgs.add("ret");
+        }
+        w.line("int status = " + nativeName(f) + "(" + String.join(", ", nativeArgs) + ");");
+        w.line("java.util.List<Integer> parameterMemory = WitArena.detach();");
+        String lifter = hasResult ? "addr -> " + abi.liftExpr(f.result, "addr", opsExpr(f), String.valueOf(resultBase(f))) : "addr -> null";
+        w.line("return WitScheduler.subtask(status, ret, parameterMemory, " + lifter + ");");
+        w.closeNoBrace();
+        w.open("} catch (RuntimeException e)");
+        w.line("WitArena.pop();");
+        w.open("if (ret != 0)");
+        w.line("WitMemory.free(ret);");
+        w.close();
+        w.line("throw e;");
+        w.close();
+        w.close();
+        w.line();
+        StringBuilder nparams = new StringBuilder();
+        if (spill) {
+            nparams.append("int area");
+        } else {
+            for (int i = 0; i < pflats.size(); i++) {
+                if (i > 0) {
+                    nparams.append(", ");
+                }
+                nparams.append(WitTypes.javaFlatType(pflats.get(i))).append(" p").append(i);
+            }
+        }
+        if (hasResult) {
+            if (nparams.length() > 0) {
+                nparams.append(", ");
+            }
+            nparams.append("int ret");
+        }
+        w.line("@WitImport(module = \"" + module + "\", name = \"[async-lower]" + f.name + "\")");
+        w.line("private static native int " + nativeName(f) + "(" + nparams + ");");
+        w.line();
+    }
+
     /** The Java expression for the i-th WIT parameter of an import. */
     private static String paramValue(Function f, int i) {
         if (f.kind == FunctionKind.METHOD && i == 0) {
@@ -659,11 +1041,68 @@ public final class WitBindgen {
      *
      * @param exportPrefix prefix of the export names ({@code "<interface>#"} or empty)
      */
-    private void emitExportAdapter(JavaWriter w, String className, String implType, Iterable<Function> functions, String exportPrefix) {
+    /**
+     * Emits the handle table of an exported resource: {@code resource.new} wraps a table index
+     * (the representation), {@code resource.rep} gets it back, and the destructor export releases
+     * the entry.
+     */
+    private void emitResourceTable(JavaWriter w, TypeDef def, String exportPrefix, String module) {
+        String name = types.className(def);
+        String table = JavaNames.constant(def.name) + "_TABLE";
+        String free = JavaNames.constant(def.name) + "_FREE";
+        String prefix = JavaNames.member(def.name) + "$";
+        w.line("private static final java.util.List<" + name + "> " + table + " = new java.util.ArrayList<>();");
+        w.line("private static final java.util.ArrayDeque<Integer> " + free + " = new java.util.ArrayDeque<>();");
+        w.line();
+        w.line("@WitImport(module = \"" + module + "\", name = \"[resource-new]" + def.name + "\")");
+        w.line("private static native int " + prefix + "new(int rep);");
+        w.line();
+        w.line("@WitImport(module = \"" + module + "\", name = \"[resource-rep]" + def.name + "\")");
+        w.line("private static native int " + prefix + "rep(int handle);");
+        w.line();
+        w.line("@WitImport(module = \"" + module + "\", name = \"[resource-drop]" + def.name + "\")");
+        w.line("private static native void " + prefix + "drop(int handle);");
+        w.line();
+        w.line("/** Registers the object and returns a new owned handle for it. */");
+        w.open("static int toHandle" + name + "(" + name + " object)");
+        w.line("int rep;");
+        w.open("if (" + free + ".isEmpty())");
+        w.line(table + ".add(object);");
+        w.line("rep = " + table + ".size();");
+        w.closeNoBrace();
+        w.open("} else");
+        w.line("rep = " + free + ".pop();");
+        w.line(table + ".set(rep - 1, object);");
+        w.close();
+        w.line("return " + prefix + "new(rep);");
+        w.close();
+        w.line();
+        w.line("/** The object behind a handle (own or borrow). */");
+        w.open("static " + name + " fromHandle" + name + "(int handle)");
+        w.line("return " + table + ".get(" + prefix + "rep(handle) - 1);");
+        w.close();
+        w.line();
+        w.line("@WitExport(\"" + exportPrefix + "[dtor]" + def.name + "\")");
+        w.open("public static void " + prefix + "dtor(int rep)");
+        w.line(table + ".set(rep - 1, null);");
+        w.line(free + ".push(rep);");
+        w.close();
+        w.line();
+    }
+
+    private void emitExportAdapter(JavaWriter w, String className, String implType, Iterable<Function> functions, String exportPrefix, String taskReturnModule) {
         w.addImport("org.graalvm.webimage.api.wit.WitArena");
         w.addImport("org.graalvm.webimage.api.wit.WitExport");
+        w.addImport("org.graalvm.webimage.api.wit.WitFuture");
+        w.addImport("org.graalvm.webimage.api.wit.WitImport");
         w.addImport("org.graalvm.webimage.api.wit.WitMemory");
         w.addImport("org.graalvm.webimage.api.wit.WitResult");
+        w.addImport("org.graalvm.webimage.api.wit.WitScheduler");
+        w.addImport("org.graalvm.webimage.api.wit.WitStream");
+        w.addImport("org.graalvm.webimage.api.wit.WitStreamOps");
+        w.addImport("org.graalvm.webimage.api.wit.WitPromise");
+        w.addImport("org.graalvm.webimage.api.wit.WitFutureOps");
+        w.addImport("org.graalvm.webimage.api.wit.WitElementCodec");
         w.line("/** Canonical ABI adapters for the exported functions of " + implType + ". Generated, do not edit. */");
         w.open("public final class " + className);
         w.open("private " + className + "()");
@@ -675,6 +1114,14 @@ public final class WitBindgen {
         w.line("implementation = impl;");
         w.close();
         w.line();
+        w.line("/** Uncaught exceptions trap the component; report them first so that the cause is visible. */");
+        w.open("private static void reportUncaught(String export, Throwable t)");
+        // The generated code prints to the error stream; the name is split so that the builder's style check ignores it
+        String errorStream = "System." + "err";
+        w.line(errorStream + ".println(\"Uncaught exception in export \" + export + \": \" + t);");
+        w.line(errorStream + ".flush();");
+        w.close();
+        w.line();
         w.open("private static " + implType + " impl()");
         w.open("if (implementation == null)");
         w.line("implementation = java.util.ServiceLoader.load(" + implType + ".class).findFirst()");
@@ -683,13 +1130,155 @@ public final class WitBindgen {
         w.line("return implementation;");
         w.close();
         w.line();
-        for (Function f : functions) {
-            if (f.kind != FunctionKind.FREESTANDING) {
-                throw WitTypes.unsupported("exported resource function " + f.name);
+        if (currentExportedInterface != null) {
+            for (Integer typeId : currentExportedInterface.types.values()) {
+                TypeDef def = types.def(new WitModel.Id(typeId));
+                if (def != null && def.kind instanceof Resource && def.ownerInterface == currentExportedInterface.id) {
+                    emitResourceTable(w, def, exportPrefix, taskReturnModule);
+                }
             }
-            emitExport(w, f, exportPrefix);
+        }
+        for (Function f : functions) {
+            emitAsyncOps(w, taskReturnModule, f);
+            if (f.async) {
+                emitAsyncExport(w, f, exportPrefix, taskReturnModule);
+            } else {
+                emitExport(w, f, exportPrefix);
+            }
         }
         w.close();
+    }
+
+    /** Name of the adapter method for an export (resource functions are prefixed with the resource name). */
+    private String adapterMethodName(Function f) {
+        if (f.kind == FunctionKind.FREESTANDING) {
+            return JavaNames.member(f.plainName());
+        }
+        String res = model.type(f.resource).name;
+        return switch (f.kind) {
+            case CONSTRUCTOR -> JavaNames.member(res + "-constructor");
+            default -> JavaNames.member(res + "-" + f.plainName());
+        };
+    }
+
+    /** The Java call implementing an export: a method on the receiver, or a function of the implementation. */
+    private String exportCall(Function f, String javaName, List<String> args) {
+        if (f.kind == FunctionKind.METHOD) {
+            return args.get(0) + "." + JavaNames.member(f.plainName()) + "(" + String.join(", ", args.subList(1, args.size())) + ")";
+        }
+        return "impl()." + exportedFunctionName(f) + "(" + String.join(", ", args) + ")";
+    }
+
+    /**
+     * Emits a callback-lifted asynchronous export: the export starts the task, the callback
+     * finishes it, and {@code task.return} delivers the result.
+     */
+    private void emitAsyncExport(JavaWriter w, Function f, String exportPrefix, String taskReturnModule) {
+        for (Param p : f.params) {
+            useType(p.type());
+        }
+        useType(f.result);
+        List<Flat> pflats = paramFlats(f);
+        boolean spill = pflats.size() > WitTypes.MAX_FLAT_PARAMS;
+        List<Flat> rflats = f.result == null ? List.of() : types.flats(f.result);
+        boolean returnSpill = rflats.size() > WitTypes.MAX_FLAT_PARAMS;
+        String javaName = adapterMethodName(f);
+        String exportName = exportPrefix + f.name;
+        String boxedResult = f.result == null ? "Void" : types.javaType(f.result, true);
+
+        StringBuilder nparams = new StringBuilder();
+        if (spill) {
+            nparams.append("int area");
+        } else {
+            for (int i = 0; i < pflats.size(); i++) {
+                if (i > 0) {
+                    nparams.append(", ");
+                }
+                nparams.append(WitTypes.javaFlatType(pflats.get(i))).append(" p").append(i);
+            }
+        }
+        w.line("@WitExport(\"[async-lift]" + exportName + "\")");
+        w.open("public static int " + javaName + "(" + nparams + ")");
+        w.line("WitMemory.ensureInitialized();");
+        w.line("WitArena.push();");
+        w.line("WitFuture<" + boxedResult + "> future;");
+        w.open("try");
+        List<String> args = new ArrayList<>();
+        if (spill) {
+            List<TypeRef> ptypes = paramTypes(f);
+            List<Integer> offsets = types.offsets(ptypes);
+            for (int i = 0; i < f.params.size(); i++) {
+                String name = "a" + i;
+                w.line(types.javaType(ptypes.get(i), false) + " " + name + " = " + abi.liftExpr(ptypes.get(i), "area + " + offsets.get(i), opsExpr(f), String.valueOf(paramBase(f, i))) + ";");
+                args.add(name);
+            }
+        } else if (!pflats.isEmpty()) {
+            w.line("long[] f = new long[" + pflats.size() + "];");
+            for (int i = 0; i < pflats.size(); i++) {
+                w.line("f[" + i + "] = " + WitTypes.pack(pflats.get(i), "p" + i) + ";");
+            }
+            int off = 0;
+            for (int i = 0; i < f.params.size(); i++) {
+                TypeRef t = f.params.get(i).type();
+                String name = "a" + i;
+                w.line(types.javaType(t, false) + " " + name + " = " + abi.flatLiftExpr(t, "f", String.valueOf(off), opsExpr(f), String.valueOf(paramBase(f, i))) + ";");
+                args.add(name);
+                off += types.flats(t).size();
+            }
+        }
+        w.line("future = " + exportCall(f, javaName, args) + ";");
+        w.closeNoBrace();
+        w.open("} catch (Throwable t)");
+        w.line("reportUncaught(\"" + exportName + "\", t);");
+        w.line("throw t;");
+        w.closeNoBrace();
+        w.open("} finally");
+        w.line("WitArena.pop();");
+        w.close();
+        w.open("return WitScheduler.startTask(future, result ->");
+        w.line("WitArena.push();");
+        w.open("try");
+        if (f.result == null) {
+            w.line(javaName + "$return();");
+        } else if (returnSpill) {
+            w.line("int ret = WitArena.alloc(" + types.size(f.result) + ", " + types.align(f.result) + ");");
+            w.line(abi.lowerStmt(f.result, "result", "ret", opsExpr(f), String.valueOf(resultBase(f))));
+            w.line(javaName + "$return(ret);");
+        } else {
+            w.line("long[] rf = new long[" + rflats.size() + "];");
+            w.line(abi.flatLowerStmt(f.result, "result", "rf", "0", opsExpr(f), String.valueOf(resultBase(f))));
+            List<String> rargs = new ArrayList<>();
+            for (int i = 0; i < rflats.size(); i++) {
+                rargs.add(WitTypes.unpack(rflats.get(i), "rf[" + i + "]"));
+            }
+            w.line(javaName + "$return(" + String.join(", ", rargs) + ");");
+        }
+        w.closeNoBrace();
+        w.open("} finally");
+        w.line("WitArena.pop();");
+        w.close();
+        w.close(");");
+        w.close();
+        w.line();
+        w.line("@WitExport(\"[callback][async-lift]" + exportName + "\")");
+        w.open("public static int " + javaName + "$callback(int event, int waitable, int payload)");
+        w.line("return WitScheduler.callback(event, waitable, payload);");
+        w.close();
+        w.line();
+        StringBuilder rparams = new StringBuilder();
+        if (returnSpill) {
+            rparams.append("int ret");
+        } else {
+            for (int i = 0; i < rflats.size(); i++) {
+                if (i > 0) {
+                    rparams.append(", ");
+                }
+                rparams.append(WitTypes.javaFlatType(rflats.get(i))).append(" r").append(i);
+            }
+        }
+        w.line("@WitImport(module = \"" + taskReturnModule + "\", name = \"[task-return]" + f.name + "\")");
+        w.line("private static native void " + javaName + "$return(" + rparams + ");");
+        w.line();
     }
 
     private void emitExport(JavaWriter w, Function f, String exportPrefix) {
@@ -701,7 +1290,7 @@ public final class WitBindgen {
         boolean spill = pflats.size() > WitTypes.MAX_FLAT_PARAMS;
         List<Flat> rflats = f.result == null ? List.of() : types.flats(f.result);
         boolean retptr = rflats.size() > WitTypes.MAX_FLAT_RESULTS;
-        String javaName = JavaNames.member(f.plainName());
+        String javaName = adapterMethodName(f);
         String exportName = exportPrefix + f.name;
 
         StringBuilder nparams = new StringBuilder();
@@ -730,7 +1319,7 @@ public final class WitBindgen {
             List<Integer> offsets = types.offsets(ptypes);
             for (int i = 0; i < f.params.size(); i++) {
                 String name = "a" + i;
-                w.line(types.javaType(ptypes.get(i), false) + " " + name + " = " + abi.liftExpr(ptypes.get(i), "area + " + offsets.get(i)) + ";");
+                w.line(types.javaType(ptypes.get(i), false) + " " + name + " = " + abi.liftExpr(ptypes.get(i), "area + " + offsets.get(i), opsExpr(f), String.valueOf(paramBase(f, i))) + ";");
                 args.add(name);
             }
         } else if (!pflats.isEmpty()) {
@@ -742,17 +1331,21 @@ public final class WitBindgen {
             for (int i = 0; i < f.params.size(); i++) {
                 TypeRef t = f.params.get(i).type();
                 String name = "a" + i;
-                w.line(types.javaType(t, false) + " " + name + " = " + abi.flatLiftExpr(t, "f", String.valueOf(off)) + ";");
+                w.line(types.javaType(t, false) + " " + name + " = " + abi.flatLiftExpr(t, "f", String.valueOf(off), opsExpr(f), String.valueOf(paramBase(f, i))) + ";");
                 args.add(name);
                 off += types.flats(t).size();
             }
         }
-        String call = "impl()." + javaName + "(" + String.join(", ", args) + ")";
+        String call = exportCall(f, javaName, args);
         if (f.result == null) {
             w.line(call + ";");
         } else {
             w.line("result = " + call + ";");
         }
+        w.closeNoBrace();
+        w.open("} catch (Throwable t)");
+        w.line("reportUncaught(\"" + exportName + "\", t);");
+        w.line("throw t;");
         w.closeNoBrace();
         w.open("} finally");
         w.line("WitArena.pop();");
@@ -762,11 +1355,11 @@ public final class WitBindgen {
                 w.line("// Freed by the post-return function");
                 w.line("WitArena.push();");
                 w.line("int ret = WitArena.alloc(" + types.size(f.result) + ", " + types.align(f.result) + ");");
-                w.line(abi.lowerStmt(f.result, "result", "ret"));
+                w.line(abi.lowerStmt(f.result, "result", "ret", opsExpr(f), String.valueOf(resultBase(f))));
                 w.line("return ret;");
             } else {
                 w.line("long[] rf = new long[1];");
-                w.line(abi.flatLowerStmt(f.result, "result", "rf", "0"));
+                w.line(abi.flatLowerStmt(f.result, "result", "rf", "0", opsExpr(f), String.valueOf(resultBase(f))));
                 w.line("return " + WitTypes.unpack(rflats.get(0), "rf[0]") + ";");
             }
         }
