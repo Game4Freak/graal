@@ -34,9 +34,9 @@ import org.graalvm.nativeimage.c.type.CIntPointer;
 import org.graalvm.nativeimage.c.type.CShortPointer;
 
 import com.oracle.graal.pointsto.util.TimerCollection;
-import com.oracle.svm.guest.staging.SubstrateGCOptions;
 import com.oracle.svm.core.SubstrateOptions;
 import com.oracle.svm.core.util.ExitStatus;
+import com.oracle.svm.guest.staging.SubstrateGCOptions;
 import com.oracle.svm.hosted.ImageClassLoader;
 import com.oracle.svm.hosted.MainEntryPoint;
 import com.oracle.svm.hosted.NativeImageGenerator;
@@ -51,11 +51,13 @@ import com.oracle.svm.hosted.webimage.name.WebImageNamingConvention;
 import com.oracle.svm.hosted.webimage.options.WebImageOptions;
 import com.oracle.svm.hosted.webimage.options.WebImageOptions.CompilerBackend;
 import com.oracle.svm.hosted.webimage.util.BenchmarkLogger;
+import com.oracle.svm.hosted.webimage.wasi.WebImageWasiJavaMainSupport;
 import com.oracle.svm.hosted.webimage.wasm.WebImageWasmLMJavaMainSupport;
 import com.oracle.svm.hosted.webimage.wasmgc.WebImageWasmGCJavaMainSupport;
 import com.oracle.svm.shared.option.ReplacingLocatableMultiOptionValue;
 import com.oracle.svm.util.GuestAccess;
 import com.oracle.svm.util.JVMCIReflectionUtil;
+import com.oracle.svm.webimage.JSExceptionSupport;
 import com.oracle.svm.webimage.WebImageJavaMainSupport;
 
 import jdk.graal.compiler.options.OptionDescriptor;
@@ -155,7 +157,7 @@ public class NativeImageWasmGeneratorRunner extends NativeImageGeneratorRunner {
 
         CompilerBackend backend = WebImageOptions.getBackend(classLoader);
 
-        if (backend == CompilerBackend.WASM || backend == CompilerBackend.WASMGC) {
+        if (backend != CompilerBackend.JS) {
             // For the Wasm backends, turn off closure compiler
             optionProvider.getHostedValues().put(WebImageOptions.ClosureCompiler, false);
 
@@ -164,6 +166,11 @@ public class NativeImageWasmGeneratorRunner extends NativeImageGeneratorRunner {
                 // is embedded) and the REDUCED mode makes the text file a lot easier to read
                 optionProvider.getHostedValues().put(WebImageOptions.NamingConvention, WebImageNamingConvention.NamingMode.REDUCED);
             }
+        }
+
+        if (backend == CompilerBackend.WASI && !optionProvider.getHostedValues().containsKey(JSExceptionSupport.Options.DisableStackTraces)) {
+            // There is no host support for stack traces on WASI
+            optionProvider.getHostedValues().put(JSExceptionSupport.Options.DisableStackTraces, true);
         }
 
         if (WebImageOptions.isNativeImageBackend()) {
@@ -201,6 +208,7 @@ public class NativeImageWasmGeneratorRunner extends NativeImageGeneratorRunner {
         Method mainEntryMethod = switch (WebImageOptions.getBackend(classLoader)) {
             case JS -> WebImageJavaMainSupport.class.getDeclaredMethod("run", String[].class);
             case WASM -> WebImageWasmLMJavaMainSupport.class.getDeclaredMethod("run", int.class, CIntPointer.class, CShortPointer.class);
+            case WASI -> WebImageWasiJavaMainSupport.class.getDeclaredMethod("run");
             case WASMGC -> WebImageWasmGCJavaMainSupport.class.getDeclaredMethod("run", String[].class);
         };
         return GuestAccess.get().lookupMethod(mainEntryMethod);
@@ -211,6 +219,7 @@ public class NativeImageWasmGeneratorRunner extends NativeImageGeneratorRunner {
         return switch (WebImageOptions.getBackend(classLoader)) {
             case JS -> JVMCIReflectionUtil.getUniqueDeclaredMethod(meta, WebImageJavaMainSupport.class, "initializeLibrary", String[].class);
             case WASM -> JVMCIReflectionUtil.getUniqueDeclaredMethod(meta, WebImageWasmLMJavaMainSupport.class, "initializeLibrary", int.class, CIntPointer.class, CShortPointer.class);
+            case WASI -> JVMCIReflectionUtil.getUniqueDeclaredMethod(meta, WebImageWasiJavaMainSupport.class, "initializeLibrary");
             case WASMGC -> JVMCIReflectionUtil.getUniqueDeclaredMethod(meta, WebImageWasmGCJavaMainSupport.class, "initializeLibrary", String[].class);
         };
     }

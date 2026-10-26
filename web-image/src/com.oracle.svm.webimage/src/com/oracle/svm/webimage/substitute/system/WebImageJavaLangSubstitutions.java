@@ -42,12 +42,11 @@ import java.util.function.BooleanSupplier;
 import java.util.logging.Logger;
 import java.util.zip.DataFormatException;
 
+import org.graalvm.nativeimage.Platform;
 import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.ProcessProperties;
 
-import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.core.OS;
-import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.core.annotate.AnnotateOriginal;
 import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.annotate.Substitute;
@@ -55,13 +54,17 @@ import com.oracle.svm.core.annotate.TargetClass;
 import com.oracle.svm.core.jdk.Resources;
 import com.oracle.svm.core.jdk.resources.NativeImageResourceFileSystem;
 import com.oracle.svm.core.jdk.resources.ResourceStorageEntryBase;
+import com.oracle.svm.shared.NeverInline;
 import com.oracle.svm.shared.Uninterruptible;
+import com.oracle.svm.shared.util.SubstrateUtil;
 import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.webimage.functionintrinsics.JSFunctionIntrinsics;
 import com.oracle.svm.webimage.functionintrinsics.JSInternalErrors;
 import com.oracle.svm.webimage.platform.WebImageJSPlatform;
 import com.oracle.svm.webimage.platform.WebImagePlatform;
+import com.oracle.svm.webimage.platform.WebImageWasiPlatform;
 import com.oracle.svm.webimage.platform.WebImageWasmGCPlatform;
+import com.oracle.svm.webimage.wasi.WasiClocks;
 
 /*
  * Checkstyle: stop method name check
@@ -244,10 +247,16 @@ final class Target_java_lang_Thread_Web {
 
     @Substitute
     private static void sleep(long millis) {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            WasiClocks.sleepNanos(millis * 1_000_000L);
+        }
     }
 
     @Substitute
     private static void sleepNanos0(long nanos) {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            WasiClocks.sleepNanos(nanos);
+        }
     }
 
     @Substitute
@@ -295,6 +304,9 @@ final class Target_java_lang_System_Web {
     @Substitute
     @Uninterruptible(reason = CALLED_FROM_UNINTERRUPTIBLE_CODE, mayBeInlined = true)
     private static long nanoTime() {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            return WasiClocks.nanoTime();
+        }
         return (long) (JSFunctionIntrinsics.performanceNow() * 1_000_000d);
     }
 

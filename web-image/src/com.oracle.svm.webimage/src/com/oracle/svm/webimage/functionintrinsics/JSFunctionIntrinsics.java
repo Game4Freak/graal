@@ -28,13 +28,18 @@ import static com.oracle.svm.shared.Uninterruptible.CALLED_FROM_UNINTERRUPTIBLE_
 
 import java.util.Arrays;
 
+import org.graalvm.nativeimage.Platform;
 import org.graalvm.webimage.api.JS;
 
-import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.core.hub.DynamicHub;
+import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.webimage.ExitError;
 import com.oracle.svm.webimage.annotation.JSRawCall;
+import com.oracle.svm.webimage.platform.WebImageWasiPlatform;
+import com.oracle.svm.webimage.wasi.WasiClocks;
+import com.oracle.svm.webimage.wasi.WasiEnvironment;
+import com.oracle.svm.webimage.wasi.WasiStdio;
 
 /*
  * Checkstyle: stop method name check
@@ -86,6 +91,10 @@ public class JSFunctionIntrinsics {
     public static native Object getRaw(double o);
 
     public static void setExitCode(int exitCode) {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            // On WASI, the exit code is returned from the run export, see WebImageWasiJavaMainSupport
+            return;
+        }
         JSCallNode.intConsumer(JSCallNode.SET_EXIT_CODE, exitCode);
     }
 
@@ -96,6 +105,10 @@ public class JSFunctionIntrinsics {
      * (this may be useful when JS throws a non-Java exception)
      */
     public static void printNative(Object o) {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            // There are no host objects on WASI
+            return;
+        }
         JSCallNode.call1(JSCallNode.LLOG, o);
     }
 
@@ -119,6 +132,9 @@ public class JSFunctionIntrinsics {
          * js Date.now returns a double (java type) This doesn't pose a precision problem as a
          * double can accurately represent any millisecond timestamp until the year 287'396.
          */
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            return WasiClocks.currentTimeMillis();
+        }
         return (long) JSCallNode.doubleSupplier(JSCallNode.CURRENT_TIME_MILLIS_DATE);
     }
 
@@ -130,10 +146,16 @@ public class JSFunctionIntrinsics {
      */
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static double performanceNow() {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            return WasiClocks.nanoTime() / 1_000_000d;
+        }
         return JSCallNode.doubleSupplier(JSCallNode.PERFORMANCE_NOW);
     }
 
     public static int readBytesFromStdIn(byte[] b, int off, int len) {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            return WasiStdio.IN.read(b, off, len);
+        }
         throw VMError.unimplemented("readBytesFromStdIn(" + Arrays.toString(b) + ", " + off + ", " + len + ")");
     }
 
@@ -149,6 +171,10 @@ public class JSFunctionIntrinsics {
          * (only string with object) so we return an object here, the real call will produce a
          * string anyway (we than cast in the substitution)
          */
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            // There is no host support for stack traces on WASI
+            return null;
+        }
         return JSCallNode.supplier(JSCallNode.GEN_CALL_STACK);
     }
 
@@ -157,6 +183,9 @@ public class JSFunctionIntrinsics {
      * stacktrace.
      */
     public static Object generateBacktrace() {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            return null;
+        }
         return JSCallNode.supplier(JSCallNode.GEN_BACKTRACE);
     }
 
@@ -165,10 +194,16 @@ public class JSFunctionIntrinsics {
      * {@link #generateBacktrace()}.
      */
     public static String formatStacktrace(Object backtrace) {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            return "";
+        }
         return (String) JSCallNode.function(JSCallNode.FORMAT_STACKTRACE, backtrace);
     }
 
     public static String getCurrentWorkingDirectory() {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            return WasiEnvironment.getWorkingDirectory();
+        }
         return (String) JSCallNode.supplier(JSCallNode.GET_CURRENT_WORKING_DIRECTORY);
     }
 

@@ -43,8 +43,8 @@ import com.oracle.svm.core.graal.nodes.FloatingWordCastNode;
 import com.oracle.svm.core.graal.nodes.ReadExceptionObjectNode;
 import com.oracle.svm.core.meta.SubstrateMethodPointerConstant;
 import com.oracle.svm.core.snippets.SnippetRuntime;
-import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.hosted.webimage.codegen.WebImageJSNodeLowerer;
+import com.oracle.svm.hosted.webimage.options.WebImageOptions;
 import com.oracle.svm.hosted.webimage.wasm.WasmImports;
 import com.oracle.svm.hosted.webimage.wasm.WebImageWasmOptions;
 import com.oracle.svm.hosted.webimage.wasm.ast.ImportDescriptor;
@@ -56,14 +56,18 @@ import com.oracle.svm.hosted.webimage.wasm.ast.Instruction.Select;
 import com.oracle.svm.hosted.webimage.wasm.ast.Instruction.Unary;
 import com.oracle.svm.hosted.webimage.wasm.ast.Instructions;
 import com.oracle.svm.hosted.webimage.wasm.ast.Literal;
+import com.oracle.svm.hosted.webimage.wasm.ast.TypeUse;
 import com.oracle.svm.hosted.webimage.wasm.ast.id.WasmId;
 import com.oracle.svm.hosted.webimage.wasm.codegen.WasmIRWalker.Requirements;
 import com.oracle.svm.hosted.webimage.wasm.nodes.WasmIsNonZeroNode;
 import com.oracle.svm.hosted.webimage.wasm.nodes.WasmPopcntNode;
 import com.oracle.svm.hosted.webimage.wasm.snippets.WasmImportForeignCallDescriptor;
+import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.webimage.hightiercodegen.NodeLowerer;
 import com.oracle.svm.webimage.hightiercodegen.variables.ResolvedVar;
+import com.oracle.svm.webimage.wasi.WasiMath;
 import com.oracle.svm.webimage.wasm.WasmForeignCallDescriptor;
+import com.oracle.svm.webimage.wasm.WasmImportCallDescriptor;
 import com.oracle.svm.webimage.wasm.types.WasmPrimitiveType;
 import com.oracle.svm.webimage.wasm.types.WasmUtil;
 import com.oracle.svm.webimage.wasm.types.WasmValType;
@@ -587,6 +591,35 @@ public abstract class WebImageWasmNodeLowerer extends NodeLowerer {
         throw GraalError.unimplemented("Unsupported WasmForeignCallDescriptor: " + descriptor);
     }
 
+    /**
+     * Lowers a call to an imported Wasm function described by a {@link WasmImportCallDescriptor}.
+     * <p>
+     * The import is declared on demand, its signature is derived from the Java types of the
+     * descriptor.
+     */
+    protected Instruction lowerWasmImportCall(WasmImportCallDescriptor descriptor, Instructions args) {
+        WasmValType[] argTypes = Arrays.stream(descriptor.getArgumentTypes()).map(this::typeForImportSignature).toArray(WasmValType[]::new);
+        TypeUse typeUse;
+        if (descriptor.getResultType() == void.class) {
+            typeUse = TypeUse.withoutResult(argTypes);
+        } else {
+            typeUse = TypeUse.withResult(typeForImportSignature(descriptor.getResultType()), argTypes);
+        }
+        ImportDescriptor.Function importDescriptor = new ImportDescriptor.Function(descriptor.module, descriptor.importName, typeUse, descriptor.comment);
+        return new Call(masm.idFactory.forFunctionImport(importDescriptor), args);
+    }
+
+    /**
+     * Maps a Java type in an import signature to its Wasm type. Primitive types map to the
+     * corresponding Wasm value type regardless of backend-specific storage representations.
+     */
+    private WasmValType typeForImportSignature(Class<?> clazz) {
+        if (clazz.isPrimitive()) {
+            return WasmUtil.mapPrimitiveType(JavaKind.fromJavaClass(clazz));
+        }
+        return masm.wasmProviders.util().typeForJavaClass(clazz);
+    }
+
     protected Instruction lowerForeignCall(ForeignCall n) {
         Instructions args = new Instructions();
         n.getArguments().forEach(arg -> args.add(lowerExpression(arg)));
@@ -597,6 +630,8 @@ public abstract class WebImageWasmNodeLowerer extends NodeLowerer {
                 lowerSubstrateForeignCall(substrateDescriptor, args);
             case WasmImportForeignCallDescriptor wasmImportForeignCallDescriptor ->
                 lowerWasmImportForeignCall(wasmImportForeignCallDescriptor, args);
+            case WasmImportCallDescriptor wasmImportCallDescriptor ->
+                lowerWasmImportCall(wasmImportCallDescriptor, args);
             case WasmForeignCallDescriptor wasmForeignCallDescriptor ->
                 lowerWasmForeignCall(wasmForeignCallDescriptor, args);
             default -> throw VMError.shouldNotReachHereUnexpectedInput(descriptor);
@@ -952,6 +987,10 @@ public abstract class WebImageWasmNodeLowerer extends NodeLowerer {
     }
 
     private Instruction lowerUnaryMathIntrinsic(UnaryMathIntrinsicNode.UnaryOperation operation, ValueNode value) {
+        if (WebImageOptions.getBackend() == WebImageOptions.CompilerBackend.WASI) {
+            // No host functions available, use the Java implementation
+            return lowerSubstrateForeignCall(WasiMath.forUnary(operation), lowerExpression(value));
+        }
         ImportDescriptor.Function imported = switch (operation) {
             case LOG -> WasmImports.F64Log;
             case LOG10 -> WasmImports.F64Log10;
@@ -995,6 +1034,10 @@ public abstract class WebImageWasmNodeLowerer extends NodeLowerer {
             // Special case. The floating point remainder operation doesn't exist in WASM.
             WasmPrimitiveType type = WasmUtil.mapPrimitiveType(stackKind);
             assert type.isFloat() : type;
+            if (WebImageOptions.getBackend() == WebImageOptions.CompilerBackend.WASI) {
+                // No host function available, use the Java implementation
+                return lowerSubstrateForeignCall(type == f32 ? WasiMath.FREM : WasiMath.DREM, lowerExpression(node.getX()), lowerExpression(node.getY()));
+            }
             ImportDescriptor.Function func = type == f32 ? WasmImports.F32Rem : WasmImports.F64Rem;
             return new Call(masm.idFactory.forFunctionImport(func), lowerExpression(node.getX()), lowerExpression(node.getY()));
         } else if (node instanceof BinaryMathIntrinsicNode binaryMathIntrinsic) {
@@ -1110,6 +1153,10 @@ public abstract class WebImageWasmNodeLowerer extends NodeLowerer {
     }
 
     private Instruction lowerBinaryMathIntrinsic(BinaryMathIntrinsicNode.BinaryOperation operation, ValueNode x, ValueNode y) {
+        if (WebImageOptions.getBackend() == WebImageOptions.CompilerBackend.WASI) {
+            // No host functions available, use the Java implementation
+            return lowerSubstrateForeignCall(WasiMath.forBinary(operation), lowerExpression(x), lowerExpression(y));
+        }
         ImportDescriptor.Function imported = switch (operation) {
             case POW -> WasmImports.F64Pow;
         };

@@ -59,6 +59,7 @@ import com.oracle.svm.core.graal.nodes.WriteStackPointerNode;
 import com.oracle.svm.core.graal.stackvalue.LoweredStackValueNode;
 import com.oracle.svm.hosted.meta.HostedMethod;
 import com.oracle.svm.hosted.webimage.js.JSBody;
+import com.oracle.svm.hosted.webimage.options.WebImageOptions;
 import com.oracle.svm.hosted.webimage.wasm.WasmImports;
 import com.oracle.svm.hosted.webimage.wasm.WebImageWasmReservedRegisters;
 import com.oracle.svm.hosted.webimage.wasm.WebImageWasmVMThreadLocalSTSupport;
@@ -123,6 +124,7 @@ import jdk.graal.compiler.nodes.memory.ReadNode;
 import jdk.graal.compiler.nodes.memory.WriteNode;
 import jdk.graal.compiler.replacements.DimensionsNode;
 import jdk.graal.compiler.replacements.nodes.AssertionNode;
+import jdk.graal.compiler.replacements.nodes.BinaryMathIntrinsicGenerationNode;
 import jdk.graal.compiler.replacements.nodes.UnaryMathIntrinsicGenerationNode;
 import jdk.graal.compiler.replacements.nodes.ZeroMemoryNode;
 import jdk.graal.compiler.word.WordCastNode;
@@ -327,6 +329,8 @@ public class WebImageWasmLMNodeLowerer extends WebImageWasmNodeLowerer {
             return lowerUnary(unary);
         } else if (n instanceof UnaryMathIntrinsicGenerationNode unaryMathIntrinsicGenerationNode) {
             return lowerUnaryMathIntrinsicGeneration(unaryMathIntrinsicGenerationNode);
+        } else if (n instanceof BinaryMathIntrinsicGenerationNode binaryMathIntrinsicGenerationNode) {
+            return lowerBinaryMathIntrinsicGeneration(binaryMathIntrinsicGenerationNode);
         } else if (n instanceof ConditionalNode conditional) {
             return lowerConditional(conditional);
         } else if (n instanceof PiNode pi) {
@@ -567,6 +571,10 @@ public class WebImageWasmLMNodeLowerer extends WebImageWasmNodeLowerer {
 
     private Instruction lowerJSCall(JSCallNode n) {
         JSSystemFunction func = n.getFunctionDefinition();
+
+        if (WebImageOptions.getBackend() == WebImageOptions.CompilerBackend.WASI) {
+            throw GraalError.unimplemented("The JavaScript host function '" + func + "' is not available on the WASI target. Reached in " + n.graph().method().format("%H.%n(%p)"));
+        }
 
         boolean passesObject = false;
 

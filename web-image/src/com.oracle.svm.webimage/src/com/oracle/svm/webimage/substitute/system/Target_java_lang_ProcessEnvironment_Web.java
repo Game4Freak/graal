@@ -24,9 +24,15 @@
  */
 package com.oracle.svm.webimage.substitute.system;
 
+import java.nio.charset.StandardCharsets;
+
+import org.graalvm.nativeimage.Platform;
+
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
 import com.oracle.svm.core.annotate.TargetElement;
+import com.oracle.svm.webimage.platform.WebImageWasiPlatform;
+import com.oracle.svm.webimage.wasi.WasiEnvironment;
 
 /**
  * Mostly used to support {@link System#getenv()}.
@@ -45,6 +51,14 @@ public final class Target_java_lang_ProcessEnvironment_Web {
          * The Unix implementation seems to expect an array with 2n entries. For each of the
          * entries, the first encodes the environment variable name and the second the value.
          */
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            String[] env = WasiEnvironment.getEnvironment();
+            byte[][] result = new byte[env.length][];
+            for (int i = 0; i < env.length; i++) {
+                result[i] = env[i].getBytes(StandardCharsets.UTF_8);
+            }
+            return result;
+        }
         return new byte[0][0];
     }
 

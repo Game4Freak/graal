@@ -25,12 +25,15 @@
 
 package com.oracle.svm.webimage;
 
+import org.graalvm.nativeimage.Platform;
+
 import com.oracle.svm.core.jdk.SystemPropertiesSupport;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.AllAccess;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.DisallowLayered;
 import com.oracle.svm.shared.singletons.traits.BuiltinTraits.NoLayeredCallbacks;
 import com.oracle.svm.shared.singletons.traits.SingletonTraits;
 import com.oracle.svm.webimage.functionintrinsics.JSFunctionIntrinsics;
+import com.oracle.svm.webimage.platform.WebImageWasiPlatform;
 
 @SingletonTraits(access = AllAccess.class, layeredCallbacks = NoLayeredCallbacks.class, other = DisallowLayered.class)
 public class WebImageSystemPropertiesSupport extends SystemPropertiesSupport {
@@ -66,12 +69,21 @@ public class WebImageSystemPropertiesSupport extends SystemPropertiesSupport {
 
     @Override
     protected String osNameValue() {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            return "WASI";
+        }
         return "Web Image";
     }
 
     @Override
     protected String osVersionValue() {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            return WASI_VERSION;
+        }
         return "0.0";
     }
+
+    /** The WASI version implemented by the runtime. */
+    public static final String WASI_VERSION = "0.3.0";
 
 }

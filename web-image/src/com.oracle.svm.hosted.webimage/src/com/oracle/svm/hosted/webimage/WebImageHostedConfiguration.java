@@ -79,6 +79,7 @@ import com.oracle.svm.hosted.webimage.codegen.heap.JSBootImageHeapLowerer;
 import com.oracle.svm.hosted.webimage.codegen.type.InvokeLoweringUtil;
 import com.oracle.svm.hosted.webimage.options.WebImageOptions;
 import com.oracle.svm.hosted.webimage.pointsto.WebImageMethodTypeFlowBuilder;
+import com.oracle.svm.hosted.webimage.wasi.WebImageWasiCodeGen;
 import com.oracle.svm.hosted.webimage.wasm.WebImageWasmCodeCache;
 import com.oracle.svm.hosted.webimage.wasm.WebImageWasmHeapBreakdownProvider;
 import com.oracle.svm.hosted.webimage.wasm.WebImageWasmLMCompileQueue;
@@ -141,6 +142,7 @@ public class WebImageHostedConfiguration extends HostedConfiguration {
         return switch (getBackend()) {
             case JS -> new WebImageJSCodeGen(codeCache, hostedEntryPoints, mainEntryPoint, providers, debug, this, imageClassLoader);
             case WASM -> new WebImageWasmLMCodeGen(codeCache, heapLayout, hostedEntryPoints, mainEntryPoint, providers, debug, this);
+            case WASI -> new WebImageWasiCodeGen(codeCache, heapLayout, hostedEntryPoints, mainEntryPoint, providers, debug, this);
             case WASMGC -> new WebImageWasmGCCodeGen(codeCache, heapLayout, hostedEntryPoints, mainEntryPoint, providers, debug, this);
         };
     }
@@ -152,7 +154,7 @@ public class WebImageHostedConfiguration extends HostedConfiguration {
     public WebImageEntryFunctionLowerer getEntryFunctionLowerer() {
         return switch (getBackend()) {
             case JS -> new WebImageEntryFunctionLowerer();
-            case WASM, WASMGC -> new WebImageWasmEntryFunctionLowerer();
+            case WASM, WASMGC, WASI -> new WebImageWasmEntryFunctionLowerer();
         };
     }
 
@@ -205,14 +207,14 @@ public class WebImageHostedConfiguration extends HostedConfiguration {
     public HeapBreakdownProvider createHeapBreakdownProvider() {
         return switch (getBackend()) {
             case JS -> new WebImageJSHeapBreakdownProvider();
-            case WASM, WASMGC -> new WebImageWasmHeapBreakdownProvider();
+            case WASM, WASMGC, WASI -> new WebImageWasmHeapBreakdownProvider();
         };
     }
 
     public WebImageProviders createProviders(RuntimeConfiguration runtimeConfig, PrintStream compilerPrinter, DebugContext debug) {
         return switch (getBackend()) {
             case JS -> new WebImageJSProviders(runtimeConfig.getProviders(), compilerPrinter, debug);
-            case WASM -> new WebImageWasmProviders(runtimeConfig, runtimeConfig.getProviders(), compilerPrinter, debug);
+            case WASM, WASI -> new WebImageWasmProviders(runtimeConfig, runtimeConfig.getProviders(), compilerPrinter, debug);
             case WASMGC -> new WebImageWasmGCProviders(runtimeConfig, runtimeConfig.getProviders(), compilerPrinter, debug);
         };
     }
@@ -222,7 +224,7 @@ public class WebImageHostedConfiguration extends HostedConfiguration {
                     RuntimeConfiguration runtimeConfiguration, boolean deoptimizeAll) {
         return switch (getBackend()) {
             case JS -> new WebImageJSCompileQueue(featureHandler, hostedUniverse, runtimeConfiguration, debug);
-            case WASM -> new WebImageWasmLMCompileQueue(featureHandler, hostedUniverse, runtimeConfiguration, debug);
+            case WASM, WASI -> new WebImageWasmLMCompileQueue(featureHandler, hostedUniverse, runtimeConfiguration, debug);
             case WASMGC -> new WebImageWasmGCCompileQueue(featureHandler, hostedUniverse, runtimeConfiguration, debug);
         };
     }
@@ -233,7 +235,7 @@ public class WebImageHostedConfiguration extends HostedConfiguration {
         public NativeImageCodeCache newCodeCache(CompileQueue compileQueue, NativeImageHeap heap, Platform targetPlatform, Path tempDir) {
             return switch (getBackend()) {
                 case JS -> new WebImageCodeCache(compileQueue.getCompilationResults(), heap);
-                case WASM -> new WebImageWasmCodeCache(compileQueue.getCompilationResults(), heap);
+                case WASM, WASI -> new WebImageWasmCodeCache(compileQueue.getCompilationResults(), heap);
                 case WASMGC -> new WebImageWasmGCCodeCache(compileQueue.getCompilationResults(), heap);
             };
         }

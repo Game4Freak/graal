@@ -25,11 +25,13 @@
 
 package com.oracle.svm.hosted.webimage.test.spec;
 
+import org.junit.Assume;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.oracle.svm.hosted.webimage.codegen.long64.Long64Lowerer;
 import com.oracle.svm.hosted.webimage.test.util.JTTTestSuite;
+import com.oracle.svm.hosted.webimage.test.util.WebImageTestOptions;
 import com.oracle.svm.webimage.jtt.javascriptbody.BoolArgTest;
 import com.oracle.svm.webimage.jtt.javascriptbody.BoolReturnTest;
 import com.oracle.svm.webimage.jtt.javascriptbody.ByteReturnTest;
@@ -62,6 +64,7 @@ public class JS_JTT_JavaScriptBody extends JTTTestSuite {
 
     @BeforeClass
     public static void setupClass() {
+        Assume.assumeTrue("requires a JavaScript host", WebImageTestOptions.isJSHost());
         compileToJS(testDispatcher);
     }
 

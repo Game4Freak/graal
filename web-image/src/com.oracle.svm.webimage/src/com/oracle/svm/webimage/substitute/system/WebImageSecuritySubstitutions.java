@@ -27,10 +27,14 @@ package com.oracle.svm.webimage.substitute.system;
 
 import java.util.function.BooleanSupplier;
 
+import org.graalvm.nativeimage.Platform;
+
 import com.oracle.svm.core.annotate.Delete;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
+import com.oracle.svm.webimage.platform.WebImageWasiPlatform;
 import com.oracle.svm.webimage.substitute.WebImageUtil;
+import com.oracle.svm.webimage.wasi.WasiRandom;
 
 import sun.security.provider.NativePRNG;
 
@@ -49,6 +53,10 @@ final class Target_sun_security_NativePRNG_Web {
 
     @Substitute
     void engineNextBytes(byte[] bytes) {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            WasiRandom.nextBytes(bytes);
+            return;
+        }
         for (int i = 0; i < bytes.length; i++) {
             bytes[i] = (byte) ((WebImageUtil.random() * 256) - 128);
         }
@@ -67,6 +75,10 @@ final class Target_sun_security_provider_NativeSeedGenerator_Web {
 
     @Substitute
     private static boolean nativeGenerateSeed(byte[] result) {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            WasiRandom.nextBytes(result);
+            return true;
+        }
         for (int i = 0; i < result.length; i++) {
             result[i] = (byte) ((WebImageUtil.random() * 256) - 128);
         }

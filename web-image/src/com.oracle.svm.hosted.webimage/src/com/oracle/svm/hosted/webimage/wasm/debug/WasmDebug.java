@@ -33,20 +33,22 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.graalvm.nativeimage.ImageSingletons;
+import org.graalvm.nativeimage.Platform;
 
-import com.oracle.svm.shared.NeverInline;
-import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.core.jdk.SystemInOutErrSupport;
-import com.oracle.svm.guest.staging.log.Log;
 import com.oracle.svm.core.meta.MethodPointer;
-import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
 import com.oracle.svm.core.snippets.SnippetRuntime;
 import com.oracle.svm.core.snippets.SnippetRuntime.SubstrateForeignCallDescriptor;
 import com.oracle.svm.core.snippets.SubstrateForeignCallTarget;
-import com.oracle.svm.shared.util.VMError;
+import com.oracle.svm.guest.staging.core.graal.KnownIntrinsics;
+import com.oracle.svm.guest.staging.log.Log;
 import com.oracle.svm.hosted.webimage.wasm.nodes.WasmTrapNode;
 import com.oracle.svm.hosted.webimage.wasm.phases.StackPointerVerificationPhase;
+import com.oracle.svm.shared.NeverInline;
+import com.oracle.svm.shared.Uninterruptible;
+import com.oracle.svm.shared.util.VMError;
 import com.oracle.svm.webimage.functionintrinsics.JSCallNode;
+import com.oracle.svm.webimage.platform.WebImageWasiPlatform;
 import com.oracle.svm.webimage.wasmgc.annotation.WasmExport;
 
 public class WasmDebug {
@@ -97,6 +99,10 @@ public class WasmDebug {
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
     public static void printStackTrace() {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            // No host support for stack traces
+            return;
+        }
         JSCallNode.call(JSCallNode.PRINT_STACK_TRACE);
     }
 

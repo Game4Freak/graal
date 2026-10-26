@@ -144,7 +144,11 @@ public abstract sealed class WasmId {
 
         @Override
         protected String doResolve(ResolverContext ctxt) {
-            return descriptor.module + "_" + descriptor.name;
+            /*
+             * Import names may contain characters that are not allowed in Wasm text format ids
+             * (for example the brackets in Canonical ABI names such as "[stream-new-0]f").
+             */
+            return (descriptor.module + "_" + descriptor.name).replaceAll("[^0-9A-Za-z!#$%&'*+\\-./:<=>?@\\\\^_`|~]", "_");
         }
 
         @Override

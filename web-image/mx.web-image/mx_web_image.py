@@ -50,6 +50,8 @@ from mx_unittest import unittest
 _suite = mx.suite("web-image")
 
 _web_image_js_engine_name = [os.getenv("NODE_EXE", "node"), "--experimental-wasm-exnref"]
+# Command used to run WASI components produced by the WASI backend
+_web_image_wasmtime_cmd = [os.getenv("WASMTIME_EXE", "wasmtime"), "run"]
 
 # Name of GraalVm component defining the web-image macro
 web_image_component = "web-image"
@@ -116,6 +118,7 @@ web_image_hosted_options = [
     "VMClassName=",
     "WasmAsPath=",
     "WasmComments=",
+    "WasmToolsPath=",
     "WasmVerifyReferences",
     "Wat2WasmPath=",
 ]
@@ -503,6 +506,7 @@ class WebImageSpecTestConfig(mx_unittest.MxUnittestConfig):
         vm_args, main_class, main_class_args = config
 
         vm_args += ["-Dwebimage.test.js=" + ",".join(_web_image_js_engine_name)]
+        vm_args += ["-Dwebimage.test.wasmtime=" + ",".join(_web_image_wasmtime_cmd)]
         vm_args += ["-Dwebimage.test.launcher=" + vm_web_image_path()]
         vm_args += ["-Dwebimage.test.flags=" + ",".join(get_launcher_flags(WebImageConfiguration.test_cases))]
         # If any of the arguments contains spaces and double quotes, on Windows it will add its own quotes around

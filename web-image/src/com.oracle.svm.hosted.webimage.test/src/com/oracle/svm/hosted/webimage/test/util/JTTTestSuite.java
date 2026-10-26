@@ -100,7 +100,14 @@ public abstract class JTTTestSuite {
         return TEST_DIRECTORY.getDirectory();
     }
 
+    /**
+     * Path of the compiled image to run: the JavaScript file for the JS host, the component for
+     * WASI.
+     */
     public static Path getTestCommand() {
+        if (WebImageTestOptions.isWasiBackend()) {
+            return getTestDir().resolve(VM_IMAGE_NAME + ".wasm");
+        }
         return getTestDir().resolve(VM_IMAGE_NAME + ".js");
     }
 

@@ -71,6 +71,7 @@ public class JS_JTT_JSAnnotation extends JTTTestSuite {
 
     @BeforeClass
     public static void setupClass() {
+        Assume.assumeTrue("requires a JavaScript host", WebImageTestOptions.isJSHost());
         Path reflectConfigFile = writeReflectionConfig(REFLECT_CONFIG);
         compileToJS(testDispatcher, "-H:ReflectionConfigurationFiles=" + reflectConfigFile);
     }

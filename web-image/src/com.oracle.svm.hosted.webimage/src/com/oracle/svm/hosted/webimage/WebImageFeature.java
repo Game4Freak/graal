@@ -84,8 +84,8 @@ import com.oracle.svm.hosted.webimage.wasm.WasmLogHandler;
 import com.oracle.svm.shared.feature.AutomaticallyRegisteredFeature;
 import com.oracle.svm.shared.option.HostedOptionValues;
 import com.oracle.svm.shared.util.VMError;
-import com.oracle.svm.util.GuestAnnotationAccess;
 import com.oracle.svm.util.GuestAccess;
+import com.oracle.svm.util.GuestAnnotationAccess;
 import com.oracle.svm.util.JVMCIReflectionUtil;
 import com.oracle.svm.util.JVMCIRuntimeClassInitializationSupport;
 import com.oracle.svm.util.dynamicaccess.JVMCIRuntimeReflection;
@@ -106,6 +106,7 @@ import com.oracle.svm.webimage.substitute.system.WebImageFileSystem;
 import com.oracle.svm.webimage.substitute.system.WebImageTempFileHelper;
 import com.oracle.svm.webimage.substitute.system.WebImageTempFileHelperSupport;
 import com.oracle.svm.webimage.substitute.system.WebImageTempFileHelperSupportWithoutSecureRandom;
+import com.oracle.svm.webimage.wasi.WasiStdio;
 
 import jdk.graal.compiler.debug.DebugContext;
 import jdk.graal.compiler.graph.Node;
@@ -268,6 +269,7 @@ public class WebImageFeature implements InternalFeature {
                 CoreLogSupport.finalizeDefaultLogHandler(new WebImageLogHandler());
             }
             case WASM -> CoreLogSupport.finalizeDefaultLogHandler(new WasmLogHandler());
+            case WASI -> CoreLogSupport.finalizeDefaultLogHandler(new WasiStdio.WasiLogHandler());
         }
 
         var rawFileOperations = new WebImageRawFileOperationSupport();

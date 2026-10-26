@@ -1,0 +1,3 @@
+// Root package for the WIT world embedded into WASI components produced by Web Image.
+// The WASI 0.3 packages are vendored under deps/ from the wasmtime-wasi 50.0.0 crate.
+package graalvm:web-image-wasi;

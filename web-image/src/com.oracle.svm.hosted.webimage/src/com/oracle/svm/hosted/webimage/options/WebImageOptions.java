@@ -31,14 +31,15 @@ import org.graalvm.collections.EconomicMap;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platform;
 
-import com.oracle.svm.shared.option.HostedOptionKey;
 import com.oracle.svm.core.util.UserError;
 import com.oracle.svm.hosted.ImageClassLoader;
 import com.oracle.svm.hosted.webimage.codegen.ClosureCompilerSupport;
 import com.oracle.svm.hosted.webimage.name.WebImageNamingConvention;
+import com.oracle.svm.shared.option.HostedOptionKey;
 import com.oracle.svm.shared.option.HostedOptionValues;
 import com.oracle.svm.webimage.platform.WebImageJSPlatform;
 import com.oracle.svm.webimage.platform.WebImagePlatform;
+import com.oracle.svm.webimage.platform.WebImageWasiPlatform;
 import com.oracle.svm.webimage.platform.WebImageWasmGCPlatform;
 import com.oracle.svm.webimage.platform.WebImageWasmLMPlatform;
 
@@ -74,7 +75,12 @@ public class WebImageOptions {
     public enum CompilerBackend {
         JS(WebImageJSPlatform.class),
         WASM(WebImageWasmLMPlatform.class),
-        WASMGC(WebImageWasmGCPlatform.class);
+        WASMGC(WebImageWasmGCPlatform.class),
+        /**
+         * Linear memory backend targeting WASI 0.3, produces a WebAssembly component without a
+         * JavaScript host.
+         */
+        WASI(WebImageWasiPlatform.class);
 
         public final Class<? extends WebImagePlatform> platform;
 
@@ -85,6 +91,9 @@ public class WebImageOptions {
         public static CompilerBackend fromPlatform(Platform platform) {
             if (platform instanceof WebImageJSPlatform) {
                 return JS;
+            } else if (platform instanceof WebImageWasiPlatform) {
+                // Must be checked before WebImageWasmLMPlatform, which it extends
+                return WASI;
             } else if (platform instanceof WebImageWasmLMPlatform) {
                 return WASM;
             } else if (platform instanceof WebImageWasmGCPlatform) {

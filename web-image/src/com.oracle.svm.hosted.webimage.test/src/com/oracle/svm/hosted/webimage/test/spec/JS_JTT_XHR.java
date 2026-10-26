@@ -24,10 +24,12 @@
  */
 package com.oracle.svm.hosted.webimage.test.spec;
 
+import org.junit.Assume;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import com.oracle.svm.hosted.webimage.test.util.JTTTestSuite;
+import com.oracle.svm.hosted.webimage.test.util.WebImageTestOptions;
 import com.oracle.svm.webimage.jtt.xhr.UrlStreamTest;
 
 public class JS_JTT_XHR extends JTTTestSuite {
@@ -76,6 +78,7 @@ public class JS_JTT_XHR extends JTTTestSuite {
 
     @BeforeClass
     public static void setupClass() {
+        Assume.assumeTrue("requires a JavaScript host", WebImageTestOptions.isJSHost());
         compileToJS(UrlStreamTest.class, "--enable-url-protocols=http,https");
     }
 

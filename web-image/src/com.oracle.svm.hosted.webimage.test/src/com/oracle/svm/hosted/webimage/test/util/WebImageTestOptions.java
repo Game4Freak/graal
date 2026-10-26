@@ -32,6 +32,11 @@ import jdk.graal.compiler.debug.GraalError;
 
 public class WebImageTestOptions {
     public static final List<String> JS_CMD = Arrays.asList(System.getProperty("webimage.test.js", ",").split(","));
+    /**
+     * Command used to run WASI components (the {@code WASI} backend), followed by the component
+     * path and the program arguments.
+     */
+    public static final List<String> WASMTIME_CMD = Arrays.asList(System.getProperty("webimage.test.wasmtime", "wasmtime,run").split(","));
     private static final String LAUNCHER = System.getProperty("webimage.test.launcher");
 
     /**
@@ -90,5 +95,16 @@ public class WebImageTestOptions {
 
     public static boolean isWasmGCBackend() {
         return WebImageTestOptions.ADDITIONAL_OPTIONS.contains("-H:Backend=WASMGC");
+    }
+
+    public static boolean isWasiBackend() {
+        return WebImageTestOptions.ADDITIONAL_OPTIONS.contains("-H:Backend=WASI");
+    }
+
+    /**
+     * Whether the image runs in a JavaScript host (as opposed to a WASI runtime).
+     */
+    public static boolean isJSHost() {
+        return !isWasiBackend();
     }
 }

@@ -190,8 +190,14 @@ public class WebImageTestUtil {
         return runProcess(cmd, expectExitCode);
     }
 
+    /**
+     * Runs a compiled image with the host runtime for the current backend (Node for the JS host,
+     * Wasmtime for WASI).
+     *
+     * @param cmd Path of the image (JavaScript file or component)
+     */
     public static RunResult runJS(String cmd, String[] arguments, int expectExitCode) {
-        List<String> invokeCmd = new ArrayList<>(WebImageTestOptions.JS_CMD);
+        List<String> invokeCmd = new ArrayList<>(WebImageTestOptions.isWasiBackend() ? WebImageTestOptions.WASMTIME_CMD : WebImageTestOptions.JS_CMD);
         invokeCmd.add(cmd);
 
         if (arguments != null) {

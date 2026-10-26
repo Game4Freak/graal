@@ -14,6 +14,7 @@ Web Image uses the standard GraalVM Native Image toolchain and is enabled by pas
 > Note: Web Image is an experimental technology and under active development. APIs, tooling, and capabilities may change.
 
 For guidance on JavaScript interop, value conversion, and working with `JSObject`, see [Web Image API Guide](web-image-api.md).
+To build a standalone WASI component instead of a module with a JavaScript wrapper, see [WASI Target](wasi.md).
 
 ## Prerequisites
 

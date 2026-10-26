@@ -43,6 +43,7 @@ import com.oracle.svm.core.JavaMemoryUtil;
 import com.oracle.svm.core.SubstrateTarget;
 import com.oracle.svm.guest.staging.core.UnmanagedMemoryUtil;
 import com.oracle.svm.hosted.webimage.JSGraphBuilderPlugins;
+import com.oracle.svm.hosted.webimage.options.WebImageOptions;
 import com.oracle.svm.hosted.webimage.wasm.nodes.WasmMemoryCopyNode;
 import com.oracle.svm.hosted.webimage.wasm.nodes.WasmMemoryFillNode;
 import com.oracle.svm.hosted.webimage.wasm.nodes.WasmPopcntNode;
@@ -102,8 +103,13 @@ public class WasmLMGraphBuilderPlugins implements TargetGraphBuilderPlugins {
             registerIntegerLongPlugins(invocationPlugins, JavaKind.Long);
             registerCharacterPlugins(invocationPlugins);
             registerShortPlugins(invocationPlugins);
-            registerMathPlugins(Math.class, invocationPlugins);
-            registerMathPlugins(StrictMath.class, invocationPlugins);
+            /*
+             * The WASI target has no host functions for transcendental math, calls fall through to
+             * the pure Java implementations in the JDK (StrictMath/FdLibm).
+             */
+            boolean hostMath = WebImageOptions.getBackend() != WebImageOptions.CompilerBackend.WASI;
+            registerMathPlugins(Math.class, invocationPlugins, hostMath);
+            registerMathPlugins(StrictMath.class, invocationPlugins, hostMath);
             registerBigIntegerPlugins(invocationPlugins);
             registerArraysPlugins(invocationPlugins);
             unregisterArrayFillPlugins(invocationPlugins);
@@ -131,14 +137,23 @@ public class WasmLMGraphBuilderPlugins implements TargetGraphBuilderPlugins {
     }
 
     public static void registerMathPlugins(Class<?> mathImpl, InvocationPlugins plugins) {
+        registerMathPlugins(mathImpl, plugins, true);
+    }
+
+    /**
+     * @param hostMath whether transcendental functions should be lowered to imported host functions
+     */
+    public static void registerMathPlugins(Class<?> mathImpl, InvocationPlugins plugins, boolean hostMath) {
         Registration r = new Registration(plugins, mathImpl).setAllowOverwrite(true);
-        registerUnaryMath(r, "log", LOG);
-        registerUnaryMath(r, "log10", LOG10);
-        registerUnaryMath(r, "exp", EXP);
-        registerBinaryMath(r, "pow", POW);
-        registerUnaryMath(r, "sin", SIN);
-        registerUnaryMath(r, "cos", COS);
-        registerUnaryMath(r, "tan", TAN);
+        if (hostMath) {
+            registerUnaryMath(r, "log", LOG);
+            registerUnaryMath(r, "log10", LOG10);
+            registerUnaryMath(r, "exp", EXP);
+            registerBinaryMath(r, "pow", POW);
+            registerUnaryMath(r, "sin", SIN);
+            registerUnaryMath(r, "cos", COS);
+            registerUnaryMath(r, "tan", TAN);
+        }
 
         registerMinMax(r);
 

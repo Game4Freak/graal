@@ -25,9 +25,12 @@
 
 package com.oracle.svm.webimage.substitute;
 
+import org.graalvm.nativeimage.Platform;
 import org.graalvm.webimage.api.JS;
 
 import com.oracle.svm.webimage.annotation.JSRawCall;
+import com.oracle.svm.webimage.platform.WebImageWasiPlatform;
+import com.oracle.svm.webimage.wasi.WasiRandom;
 
 import jdk.internal.misc.Unsafe;
 
@@ -35,7 +38,17 @@ public class WebImageUtil {
 
     @JSRawCall
     @JS("return Math.random();")
-    public static native double random();
+    private static native double randomJS();
+
+    /**
+     * A uniformly distributed double in {@code [0, 1)} from the host.
+     */
+    public static double random() {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            return WasiRandom.nextDouble();
+        }
+        return randomJS();
+    }
 
     /**
      * The purpose of this method and {@link #unsafeCopyMemory} is to serve as a replacement for

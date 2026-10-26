@@ -145,7 +145,7 @@ public class CLIVisualizationSupport extends VisualizationSupport {
          */
         breakdownKeys.remove(TOTAL_METHOD_SIZE);
 
-        if (backend == CompilerBackend.WASM) {
+        if (backend == CompilerBackend.WASM || backend == CompilerBackend.WASI) {
             // Many breakdown metrics do not apply in the WASM backend.
             breakdownKeys.clear();
             breakdownKeys.add(INITIAL_DEFINITIONS_SIZE);

@@ -25,7 +25,6 @@
 
 package com.oracle.svm.hosted.webimage.wasm.codegen;
 
-import com.oracle.svm.hosted.webimage.WasmExportGuestValue;
 import static com.oracle.svm.hosted.webimage.metrickeys.ImageBreakdownMetricKeys.ENTIRE_IMAGE_SIZE;
 import static com.oracle.svm.hosted.webimage.metrickeys.ImageBreakdownMetricKeys.WASM_IMAGE_SIZE;
 import static com.oracle.svm.hosted.webimage.metrickeys.UniverseMetricKeys.EMITTED_METHODS;
@@ -48,6 +47,7 @@ import com.oracle.svm.hosted.HeapBreakdownProvider;
 import com.oracle.svm.hosted.NativeImageGenerator;
 import com.oracle.svm.hosted.image.AbstractImage;
 import com.oracle.svm.hosted.meta.HostedMethod;
+import com.oracle.svm.hosted.webimage.WasmExportGuestValue;
 import com.oracle.svm.hosted.webimage.WebImageCodeCache;
 import com.oracle.svm.hosted.webimage.WebImageHostedConfiguration;
 import com.oracle.svm.hosted.webimage.codegen.LowerableResource;
@@ -119,12 +119,13 @@ public abstract class WebImageWasmCodeGen extends WebImageCodeGen {
      */
     public static final JSFunctionDefinition ENTRY_POINT_FUN = new JSGenericFunctionDefinition("wasmRun", 1, false, null, false);
 
+    @SuppressWarnings("this-escape")
     protected WebImageWasmCodeGen(WebImageCodeCache codeCache, ImageHeapLayoutInfo heapLayout, List<HostedMethod> hostedEntryPoints, HostedMethod mainEntryPoint,
                     WebImageProviders providers, DebugContext debug, WebImageHostedConfiguration config) {
         super(codeCache, heapLayout, hostedEntryPoints, mainEntryPoint, providers, debug, config);
 
-        this.wasmFilename = this.filename + ".wasm";
-        this.watFilename = this.filename + ".wat";
+        this.wasmFilename = getWasmFilename();
+        this.watFilename = getWatFilename();
         this.watFile = NativeImageGenerator.generatedFiles(options).resolve(this.watFilename);
         this.wasmFile = NativeImageGenerator.generatedFiles(options).resolve(this.wasmFilename);
     }
@@ -240,6 +241,37 @@ public abstract class WebImageWasmCodeGen extends WebImageCodeGen {
 
     protected abstract void writeImageHeap();
 
+    /**
+     * File name of the binary Wasm module, relative to the output directory.
+     * <p>
+     * Called from the constructor, must only depend on {@link #imageName} and {@link #filename}.
+     */
+    protected String getWasmFilename() {
+        return filename + ".wasm";
+    }
+
+    /**
+     * File name of the Wasm text format file, see {@link #getWasmFilename()}.
+     */
+    protected String getWatFilename() {
+        return filename + ".wat";
+    }
+
+    /**
+     * Name under which the main entry point is exported.
+     */
+    protected String getMainExportName() {
+        return "main";
+    }
+
+    /**
+     * Whether the tag for Java exceptions is exported (required by the JS runtime to identify Java
+     * exceptions).
+     */
+    protected boolean exportJavaThrowableTag() {
+        return true;
+    }
+
     @Override
     protected Collection<Path> writeFiles() {
         List<Path> outFiles = new ArrayList<>(super.writeFiles());
@@ -277,7 +309,7 @@ public abstract class WebImageWasmCodeGen extends WebImageCodeGen {
         LoggerContext.counter(UniverseMetricKeys.EMITTED_TYPES).add(compilations.keySet().stream().map(ResolvedJavaMethod::getDeclaringClass).distinct().count());
 
         // The main entry point method will always be exported as 'main'.
-        module.addFunctionExport(getProviders().idFactory.forMethod(mainEntryPoint), "main", "Main Entry Point");
+        module.addFunctionExport(getProviders().idFactory.forMethod(mainEntryPoint), getMainExportName(), "Main Entry Point");
 
         for (HostedMethod entryPoint : hostedEntryPoints) {
             if (GuestAnnotationAccess.isAnnotationPresent(entryPoint, WasmExport.class)) {
@@ -291,7 +323,9 @@ public abstract class WebImageWasmCodeGen extends WebImageCodeGen {
         }
 
         getProviders().knownIds.getExports().forEach(module::addExport);
-        module.addExport(new Export(Export.Type.TAG, getProviders().knownIds.getJavaThrowableTag(), "tag.throwable", "Tag for Java exceptions"));
+        if (exportJavaThrowableTag()) {
+            module.addExport(new Export(Export.Type.TAG, getProviders().knownIds.getJavaThrowableTag(), "tag.throwable", "Tag for Java exceptions"));
+        }
     }
 
     /**

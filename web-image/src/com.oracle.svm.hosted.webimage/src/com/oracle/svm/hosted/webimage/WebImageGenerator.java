@@ -71,6 +71,7 @@ import com.oracle.svm.hosted.webimage.logging.LoggerContext;
 import com.oracle.svm.hosted.webimage.logging.LoggerScope;
 import com.oracle.svm.hosted.webimage.logging.visualization.VisualizationSupport;
 import com.oracle.svm.hosted.webimage.options.WebImageOptions;
+import com.oracle.svm.hosted.webimage.wasi.WebImageWasiJavaMainSupport;
 import com.oracle.svm.hosted.webimage.wasm.WebImageWasmLMJavaMainSupport;
 import com.oracle.svm.hosted.webimage.wasm.annotation.WasmStartFunction;
 import com.oracle.svm.hosted.webimage.wasm.codegen.WasmWebImage;
@@ -159,6 +160,7 @@ public class WebImageGenerator extends NativeImageGenerator {
             JavaMainSupport support = switch (WebImageOptions.getBackend(loader)) {
                 case JS -> new WebImageJSJavaMainSupport(originalClass, originalMethod);
                 case WASM -> new WebImageWasmLMJavaMainSupport(originalClass, originalMethod);
+                case WASI -> new WebImageWasiJavaMainSupport(originalClass, originalMethod);
                 case WASMGC -> new WebImageWasmGCJavaMainSupport(originalClass, originalMethod);
             };
             ImageSingletons.add(JavaMainSupport.class, support);
@@ -189,13 +191,19 @@ public class WebImageGenerator extends NativeImageGenerator {
         HostedMethod mainEntryPointMethod = hUniverse.lookup(aUniverse.lookup(method));
         this.image = switch (WebImageOptions.getBackend()) {
             case JS -> new WebImage(k, this.hUniverse, hMetaAccess, nativeLibraries, heap, heapLayout, codeCache, hostedEntryPoints, loader, mainEntryPointMethod);
-            case WASM, WASMGC -> new WasmWebImage(k, this.hUniverse, hMetaAccess, nativeLibraries, heap, heapLayout, codeCache, hostedEntryPoints, loader, mainEntryPointMethod);
+            case WASM, WASMGC, WASI -> new WasmWebImage(k, this.hUniverse, hMetaAccess, nativeLibraries, heap, heapLayout, codeCache, hostedEntryPoints, loader, mainEntryPointMethod);
         };
     }
 
-    private static void setWebImageSystemProperties() {
-        System.setProperty("svm.targetName", "Browser");
-        System.setProperty("svm.targetArch", "ECMAScript 2015");
+    private void setWebImageSystemProperties() {
+        if (WebImageOptions.getBackend(loader) == WebImageOptions.CompilerBackend.WASI) {
+            // Reported as os.name and os.arch
+            System.setProperty("svm.targetName", "WASI");
+            System.setProperty("svm.targetArch", "wasm32");
+        } else {
+            System.setProperty("svm.targetName", "Browser");
+            System.setProperty("svm.targetArch", "ECMAScript 2015");
+        }
         if (ImageLayerBuildingSupport.lastImageBuild()) {
             ImageKindInfoSingleton.singleton().setImageKindInfoProperty(ImageInfo.PROPERTY_IMAGE_KIND_VALUE_EXECUTABLE);
         }
@@ -211,7 +219,7 @@ public class WebImageGenerator extends NativeImageGenerator {
     @Override
     protected void registerEntryPoints(Map<ResolvedJavaMethod, CEntryPointData> entryPoints) {
         GuestTypes guestTypes = loader.guestTypes;
-        if (WebImageOptions.getBackend() == WebImageOptions.CompilerBackend.WASM || WebImageOptions.getBackend() == WebImageOptions.CompilerBackend.WASMGC) {
+        if (WebImageOptions.getBackend() != WebImageOptions.CompilerBackend.JS) {
             List<ResolvedJavaMethod> startFunctions = guestTypes.findAnnotatedMethods(WasmStartFunction.class);
             GraalError.guarantee(startFunctions.size() <= 1, "Only a single start function must exist: %s", startFunctions);
 

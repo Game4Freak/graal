@@ -34,7 +34,7 @@ import com.oracle.svm.shared.singletons.traits.SingletonTraits;
  * Platform for the Wasm linear memory (LM) backend.
  */
 @SingletonTraits(access = BuildtimeAccessOnly.class, layeredCallbacks = NoLayeredCallbacks.class, other = DisallowLayered.class)
-public final class WebImageWasmLMPlatform implements WebImagePlatform {
+public class WebImageWasmLMPlatform implements WebImagePlatform {
 
     @Override
     public String getOS() {
