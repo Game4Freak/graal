@@ -80,6 +80,7 @@ public class WebImageWasmCompilationResult extends WebImageCompilationResult {
      * method.
      */
     protected final List<StackSlot> liveSlots = new ArrayList<>();
+    private final java.util.Map<Integer, jdk.vm.ci.code.BytecodePosition> callPositions = new java.util.HashMap<>();
 
     public WebImageWasmCompilationResult(CompilationIdentifier compilationId, String name) {
         super(compilationId, name);
@@ -133,6 +134,18 @@ public class WebImageWasmCompilationResult extends WebImageCompilationResult {
 
     public void setReturnType(ResolvedJavaType returnType) {
         this.returnType = Objects.requireNonNull(returnType);
+    }
+
+    /**
+     * Records the bytecode position of the call that ends at the given method-relative IP. Used
+     * for stack traces.
+     */
+    public void recordCallPosition(int relativeIP, jdk.vm.ci.code.BytecodePosition position) {
+        callPositions.put(relativeIP, position);
+    }
+
+    public jdk.vm.ci.code.BytecodePosition getCallPosition(int relativeIP) {
+        return callPositions.get(relativeIP);
     }
 
     public void addLiveStackSlot(StackSlot slot) {

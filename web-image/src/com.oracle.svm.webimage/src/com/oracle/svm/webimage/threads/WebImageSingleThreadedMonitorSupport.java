@@ -24,6 +24,7 @@
  */
 package com.oracle.svm.webimage.threads;
 
+import com.oracle.svm.webimage.wasi.threads.WasiThreads;
 import com.oracle.svm.shared.Uninterruptible;
 import com.oracle.svm.core.monitor.MonitorInflationCause;
 import com.oracle.svm.core.monitor.MonitorSupport;
@@ -81,13 +82,20 @@ public class WebImageSingleThreadedMonitorSupport extends MonitorSupport {
          * questionable whether this implementation is useful, especially waiting without a timeout.
          * But it is the best thing we can do.
          */
+        if (WasiThreads.enabled()) {
+            // Other threads run meanwhile and can notify or interrupt this one
+            WasiThreads.await(obj, timeoutMillis);
+            return;
+        }
         Thread.sleep(timeoutMillis == 0 ? Long.MAX_VALUE : timeoutMillis);
     }
 
     @Override
     public void notify(Object obj, boolean notifyAll) {
-        /* No other thread can be waiting, so notify is a no-op. */
-        return;
+        if (WasiThreads.enabled()) {
+            WasiThreads.wakeWaiters(obj, notifyAll);
+        }
+        /* Otherwise no other thread can be waiting, so notify is a no-op. */
     }
 
     @Override

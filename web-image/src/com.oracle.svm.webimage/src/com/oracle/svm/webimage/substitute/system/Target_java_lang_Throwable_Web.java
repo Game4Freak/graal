@@ -42,6 +42,7 @@ import com.oracle.svm.core.annotate.TargetElement;
 import com.oracle.svm.webimage.JSExceptionSupport;
 import com.oracle.svm.webimage.functionintrinsics.JSFunctionIntrinsics;
 import com.oracle.svm.webimage.platform.WebImageJSPlatform;
+import com.oracle.svm.webimage.wasm.stack.WasmStackTraceSupport;
 import com.oracle.svm.webimage.platform.WebImageWasmGCPlatform;
 import com.oracle.svm.webimage.platform.WebImageWasmLMPlatform;
 
@@ -105,7 +106,13 @@ public final class Target_java_lang_Throwable_Web {
     private Throwable fillInStackTrace_WasmLM() {
         // Checkstyle: resume method name check
         if (!JSExceptionSupport.Options.DisableStackTraces.getValue()) {
-            this.backtrace = JSFunctionIntrinsics.generateStackTrace();
+            if (WasmStackTraceSupport.isAvailable()) {
+                // The pseudo instruction pointers of the shadow stack, decoded on demand
+                this.backtrace = WasmStackTraceSupport.captureBacktrace();
+                this.stackTrace = null;
+            } else {
+                this.backtrace = JSFunctionIntrinsics.generateStackTrace();
+            }
         }
         return SubstrateUtil.cast(this, Throwable.class);
     }
@@ -130,6 +137,9 @@ public final class Target_java_lang_Throwable_Web {
 final class Target_java_lang_StackTraceElement_Web {
     @Substitute
     static StackTraceElement[] of(Object x, int depth) {
+        if (WasmStackTraceSupport.isAvailable() && x instanceof int[]) {
+            return WasmStackTraceSupport.toStackTrace(x, true);
+        }
         return new StackTraceElement[]{SyntheticStackSupport.MAIN_STACK_TRACE_ELEMENT};
     }
 }

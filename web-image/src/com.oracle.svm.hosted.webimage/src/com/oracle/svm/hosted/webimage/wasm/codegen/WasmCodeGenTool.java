@@ -156,6 +156,14 @@ public abstract class WasmCodeGenTool extends CodeGenTool {
      * <p>
      * Always use this method when generating a Wasm call to a Java method.
      */
+    /**
+     * Announces the node for which the next call is generated with {@link #getCall}, so that
+     * backends that keep per-call metadata can record its bytecode position. {@code null} clears
+     * it.
+     */
+    public void setCallPosition(@SuppressWarnings("unused") jdk.graal.compiler.graph.Node node) {
+    }
+
     public abstract Instruction.AbstractCall getCall(InvokeTarget target, boolean direct, Instruction.AbstractCall callInstruction);
 
     public void genInst(Instruction inst, Node n) {

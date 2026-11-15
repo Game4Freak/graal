@@ -25,6 +25,7 @@
 
 package com.oracle.svm.webimage.substitute.system;
 
+import com.oracle.svm.webimage.wasm.stack.WasmStackTraceSupport;
 import java.lang.StackWalker.StackFrame;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -40,16 +41,31 @@ final class Target_java_lang_StackWalker_Web {
 
     @Substitute
     private void forEach(Consumer<? super StackFrame> action) {
+        if (WasmStackTraceSupport.isAvailable()) {
+            WasmStackTraceSupport.captureFrames().forEach(action);
+            return;
+        }
         throw new UnsupportedOperationException("StackWalker.forEach");
     }
 
     @Substitute
     private Class<?> getCallerClass() {
+        if (WasmStackTraceSupport.isAvailable()) {
+            // Frame 0 is the method that asks, frame 1 is its caller
+            java.util.List<StackFrame> frames = WasmStackTraceSupport.captureFrames();
+            if (frames.size() < 2) {
+                throw new IllegalCallerException("no caller frame");
+            }
+            return frames.get(1).getDeclaringClass();
+        }
         throw new UnsupportedOperationException("StackWalker.getCallerClass");
     }
 
     @Substitute
     private <T> T walk(Function<? super Stream<StackFrame>, ? extends T> function) {
+        if (WasmStackTraceSupport.isAvailable()) {
+            return function.apply(WasmStackTraceSupport.captureFrames().stream());
+        }
         if (SyntheticStackSupport.MAIN_STACK_FRAME == null) {
             throw new UnsupportedOperationException("StackWalker.walk");
         }

@@ -438,6 +438,16 @@ public abstract class PlatformThreads {
     }
 
     /**
+     * Replaces the Java thread object of the current VM thread. This is for runtimes that run
+     * several Java threads on one VM thread and switch between them cooperatively; the caller is
+     * responsible for every other piece of thread-specific state.
+     */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static void switchCurrentThreadObject(Thread thread) {
+        currentThread.set(thread);
+    }
+
+    /**
      * Returns true if the {@link Thread} object for the current thread exists. This method only
      * returns false in the very early initialization stages of a newly attached thread.
      */

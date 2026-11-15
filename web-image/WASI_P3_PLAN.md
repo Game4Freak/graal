@@ -1,6 +1,6 @@
 # Plan: WASI 0.3 and Component Model Support for Web Image
 
-Status: in progress, last updated 2026-10-26 (Phases 0 to 5 done; CI artifacts still need uploading; Phase 6 open).
+Status: in progress, last updated 2026-11-14 (Phases 0 to 5 done, including stack traces, cooperative threads, and a Quarkus application as a `wasi:http` handler; CI artifacts still need uploading; Phase 6 open).
 This document records the plan for teaching the Native Image WebAssembly backend (Web Image) to produce a WebAssembly component that targets WASI 0.3 (also known as WASI Preview 3, or "p3") and to generate bindings for custom WebAssembly Interface Type (WIT) interfaces, including `async` functions, `stream<T>`, and `future<T>`.
 
 ## Goals
@@ -254,7 +254,31 @@ Design notes (2026-10-26), refined from what Phases 1 to 4 established:
 - Required Wasmtime flags: none for the async lift/lower and stream built-ins (verified in Phase 0 with default flags on Wasmtime 50); `-W component-model-async-stackful` is not needed.
 - Prerequisite in the builder: `WitBindingFeature` must allow the `[async-lift]`, `[callback]`, and `[task-return]` export and import names (they are plain `@WitExport`/`@WitImport` names, so no change is expected) and the codegen must keep the exported Java method's core signature intact.
 
+Status (2026-11-13), step 4 done: components for a host application framework (`wasi:http` handler in a composed runtime).
+
+- Verified with a module of the Light framework: the framework generates a WIT tree with an empty root package and the module world under `deps/` (`import wasi:http/types@0.3.0; import wasi:sql/...; export wasi:http/handler@0.3.0`), builds nothing itself, and runs the component next to its HTTP server, HTTP types, and SQL components on an embedded Wasmtime with component-model async.
+  The Java component implements the generated `Handler` (`handle: async func(request) -> result<response, error-code>`), reads the request body stream, calls synchronous `wasi:sql` imports, and writes the response body stream after returning the response.
+- Changes that this needed:
+  - `WitModel.findWorld` accepts `namespace:package/world@version`.
+  - The generator only skips the WASI packages of the runtime (`cli`, `clocks`, `random`, `filesystem`, `sockets`); `wasi:http`, `wasi:sql`, and other WASI packages are generated, including exported ones (`wasi:http/handler`).
+  - `WasiWit.prepareUserWit`: a world selected by qualified name no longer has to include `wasi:cli/imports`; the builder embeds a synthetic world (`graalvm:webimage-component/component`) that includes both, and adds the bundled WASI packages when the tree has no `wasi:cli`.
+  - `wasm-tools component embed` runs with `--all-features`, because WIT trees fetched from registries keep `wasi:cli/exit#exit-with-code` behind `@unstable(feature = cli-exit-with-code)` and the runtime imports it.
+- Application used for the test: an OpenID Connect server built on the Keycloak libraries (`keycloak-core`, the default BouncyCastle crypto provider, Jackson), 53 MB as a component, about 2.5 minutes to build; 43 end-to-end checks pass (token grants, RS256 signatures checked outside the server, introspection, admin REST API on SQLite).
+  Findings for larger applications: reflection metadata has to be registered through a `Feature` (there is no Tracing Agent run for this target), JCA providers that are added at run time need `--future-defaults=run-time-initialize-security-providers`, `-H:AdditionalSecurityProviders=`, and the provider installed in the builder, and the missing stack traces make run-time failures expensive to locate.
+
+Status (2026-11-14), step 5 done: stack traces, threads, and a Quarkus application.
+
+- Stack traces without a host: the linear-memory backend already stores a pseudo instruction pointer per call site in the shadow stack for the collector. `WasmLMStackTraceSupport` walks it (a foreign call, because throwables are also created inside snippets), `WebImageWasmCodeCache` records per IP the bytecode positions of the call site (`TrackNodeSourcePosition` is switched on for the target) as pairs of method index and line, and `WasmCodeInfoHolder` decodes them. `Throwable`, `Thread.getStackTrace`, `StackWalker`, and `Reflection.getCallerClass` use it. Size: 2.4 MB to 3.4 MB for Hello World, nothing with `-H:+DisableStackTraces`.
+- Threads (`-H:+WasiThreads`, `com.oracle.svm.webimage.wasi.threads`): Java threads are cooperative threads of the Component Model (`thread.new-indirect`, `thread.suspend-then-resume`, `thread.resume-later`, `thread.index`; Wasmtime 50 with `-W component-model-threading`, `wasm-tools` 1.263 through the legacy import names and the `__indirect_function_table` export). Each thread has its own shadow stack; the stack pointer global is saved in a local across a switch; the current `Thread` and the stack overflow boundary are switched with the thread; the collector walks the stacks of suspended threads (`WasiThreadStacks`). A Java-side scheduler implements park and unpark, sleep, yield, wait and notify, interrupts, and the end of the program. Monitors stay no-ops. Verified with a 20-check program (pools, `CompletableFuture`, scheduled executor, collection while other threads hold objects only on their stacks).
+- Exports with threads: the host calls every export on a new thread of its own; the fiber of the initial thread adopts it (`WitScheduler.enteredFromHost`). A callback-lifted export may block on its stack (it holds the instance's exclusive lock meanwhile, so no second call enters), which lets the other threads run; before returning to the host the runtime drains the runnable threads (`WitScheduler.returningToHost`). A thread created during one export call can be resumed during a later one (checked with a hand-written component).
+- Quarkus 3.40 (`quarkus-rest-jackson`: RESTEasy Reactive, Vert.x, Netty, ArC, Jackson) runs as a `wasi:http` handler in the Light runtime: the output of `quarkus.native.sources-only` is compiled with `-H:Backend=WASI -H:+WasiThreads`, requests go through Quarkus' virtual HTTP channel, and a JDBC driver on `wasi:sql` serves the application's SQL. 26 end-to-end checks pass; a 57 MB component, 2 minutes 15 seconds to build, 0.8 s start in the first request, 5 to 40 ms for small requests, 275 ms for a 620 KB JSON response.
+- What Quarkus needed from this backend, besides the two items above: `-H:-ReplaceLoggerLookup` (Quarkus substitutes `Logger.getLogger` itself), `ProcessHandle.info()`, `file:` URIs for paths of the default file system, `System.exit` through `wasi:cli/exit`, no asynchronous file channel in the in-memory file system, and `PlatformThreads.switchCurrentThreadObject` in the core. Outside of this repository: Vert.x' event loop group replaced by Netty's `DefaultEventLoopGroup` (no selector), reflection metadata for Netty's `Unsafe` probe, and `--add-opens java.base/java.lang` for the builder.
+
 ### Phase 6: Hardening and Follow-ups
+
+- Threads: real monitor ownership across blocking operations, timers that fire while the component is not executing, a stackful lift for exports so that calls can overlap, and letting other threads run during blocking host calls.
+- Sockets on `wasi:sockets` for `java.net` and NIO, which is what client libraries (JDBC drivers, HTTP clients) need.
+- The requested stack size of a thread is ignored (`Thread.start0` does not see it).
 
 - Size and performance: run `wasm-opt` on the core module before `component new`; compare against the JS host.
 - Debugging: keep DWARF or name section support through `wasm-tools` (`--debug` style flags).

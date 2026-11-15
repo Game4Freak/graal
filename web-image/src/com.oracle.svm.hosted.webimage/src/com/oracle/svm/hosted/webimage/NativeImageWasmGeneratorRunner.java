@@ -57,7 +57,6 @@ import com.oracle.svm.hosted.webimage.wasmgc.WebImageWasmGCJavaMainSupport;
 import com.oracle.svm.shared.option.ReplacingLocatableMultiOptionValue;
 import com.oracle.svm.util.GuestAccess;
 import com.oracle.svm.util.JVMCIReflectionUtil;
-import com.oracle.svm.webimage.JSExceptionSupport;
 import com.oracle.svm.webimage.WebImageJavaMainSupport;
 
 import jdk.graal.compiler.options.OptionDescriptor;
@@ -163,9 +162,13 @@ public class NativeImageWasmGeneratorRunner extends NativeImageGeneratorRunner {
             }
         }
 
-        if (backend == CompilerBackend.WASI && !optionProvider.getHostedValues().containsKey(JSExceptionSupport.Options.DisableStackTraces)) {
-            // There is no host support for stack traces on WASI
-            optionProvider.getHostedValues().put(JSExceptionSupport.Options.DisableStackTraces, true);
+        boolean stackTraces = !Boolean.TRUE.equals(optionProvider.getHostedValues().get(com.oracle.svm.webimage.JSExceptionSupport.Options.DisableStackTraces));
+        if (backend == CompilerBackend.WASI && stackTraces && !optionProvider.getHostedValues().containsKey(jdk.graal.compiler.core.common.GraalOptions.TrackNodeSourcePosition)) {
+            /*
+             * Stack traces on WASI are computed from the shadow stack. The bytecode positions of
+             * call sites give them line numbers and the frames of inlined methods.
+             */
+            optionProvider.getHostedValues().put(jdk.graal.compiler.core.common.GraalOptions.TrackNodeSourcePosition, true);
         }
 
         if (WebImageOptions.isNativeImageBackend()) {

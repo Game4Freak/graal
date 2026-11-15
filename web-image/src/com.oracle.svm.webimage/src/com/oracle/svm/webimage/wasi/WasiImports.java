@@ -97,6 +97,17 @@ public final class WasiImports {
 
     // Component Model built-ins in the root module
 
+    // Cooperative threads (Component Model threading)
+
+    /** {@code thread.index: [] -> [i32]}, the index of the current thread. */
+    public static final WasmImportCallDescriptor THREAD_INDEX = new WasmImportCallDescriptor(ROOT, "[thread-index]", int.class, NONE, "canon thread.index");
+    /** {@code thread.new-indirect: [table index, context] -> [thread]}, the new thread is suspended. */
+    public static final WasmImportCallDescriptor THREAD_NEW_INDIRECT = new WasmImportCallDescriptor(ROOT, "[thread-new-indirect-v0]", int.class, II, "canon thread.new-indirect");
+    /** {@code thread.suspend-then-resume: [thread] -> [i32]}, switches to a suspended thread. */
+    public static final WasmImportCallDescriptor THREAD_SUSPEND_THEN_RESUME = new WasmImportCallDescriptor(ROOT, "[thread-suspend-then-resume]", int.class, I, "canon thread.suspend-then-resume");
+    /** {@code thread.resume-later: [thread] -> []}, makes a suspended thread ready to run. */
+    public static final WasmImportCallDescriptor THREAD_RESUME_LATER = new WasmImportCallDescriptor(ROOT, "[thread-resume-later]", void.class, I, "canon thread.resume-later");
+
     /** {@code waitable-set.new: [] -> [i32]}. */
     public static final WasmImportCallDescriptor WAITABLE_SET_NEW = new WasmImportCallDescriptor(ROOT, "[waitable-set-new]", int.class, NONE, "canon waitable-set.new");
     /** {@code waitable-set.wait: [set, ptr] -> [event-code]}, the event is written to ptr. */

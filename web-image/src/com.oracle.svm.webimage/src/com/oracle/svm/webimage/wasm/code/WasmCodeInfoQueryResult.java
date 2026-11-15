@@ -46,10 +46,27 @@ public class WasmCodeInfoQueryResult {
      */
     @UnknownObjectField(availability = AfterCompilation.class) private int[] referenceOffsets;
 
+    /**
+     * The Java frames at this IP as pairs of a method index (see
+     * {@link WasmCodeInfoHolder#setSourceMethods}) and a line number, innermost frame first. There
+     * is more than one pair if the IP is in inlined code.
+     */
+    @UnknownObjectField(availability = AfterCompilation.class) private int[] sourceFrames;
+
     @Platforms(Platform.HOSTED_ONLY.class)
     public WasmCodeInfoQueryResult(FrameData frameData, int[] referenceOffsets) {
+        this(frameData, referenceOffsets, new int[0]);
+    }
+
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public WasmCodeInfoQueryResult(FrameData frameData, int[] referenceOffsets, int[] sourceFrames) {
         this.frameData = frameData;
         this.referenceOffsets = referenceOffsets;
+        this.sourceFrames = sourceFrames;
+    }
+
+    public int[] getSourceFrames() {
+        return sourceFrames;
     }
 
     @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)

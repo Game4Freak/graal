@@ -400,6 +400,7 @@ public class WebImageWasmLMNodeLowerer extends WebImageWasmNodeLowerer {
         LoweredCallTargetNode callTarget = (LoweredCallTargetNode) node.callTarget();
         Instructions params = new Instructions();
         callTarget.arguments().forEach(param -> params.add(lowerExpression(param)));
+        masm().setCallPosition(node);
 
         if (callTarget instanceof IndirectCallTargetNode indirectCallTarget) {
             WasmPrimitiveType addressType = util.typeForNode(indirectCallTarget.computedAddress()).asPrimitive();

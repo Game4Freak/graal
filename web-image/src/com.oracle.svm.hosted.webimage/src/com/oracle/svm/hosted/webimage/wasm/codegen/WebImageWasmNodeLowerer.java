@@ -625,7 +625,8 @@ public abstract class WebImageWasmNodeLowerer extends NodeLowerer {
         n.getArguments().forEach(arg -> args.add(lowerExpression(arg)));
 
         ForeignCallDescriptor descriptor = n.getDescriptor();
-        return switch (descriptor) {
+        masm.setCallPosition(n.asNode());
+        Instruction call = switch (descriptor) {
             case SnippetRuntime.SubstrateForeignCallDescriptor substrateDescriptor ->
                 lowerSubstrateForeignCall(substrateDescriptor, args);
             case WasmImportForeignCallDescriptor wasmImportForeignCallDescriptor ->
@@ -636,6 +637,9 @@ public abstract class WebImageWasmNodeLowerer extends NodeLowerer {
                 lowerWasmForeignCall(wasmForeignCallDescriptor, args);
             default -> throw VMError.shouldNotReachHereUnexpectedInput(descriptor);
         };
+        // Not every foreign call is a call that consumes the position
+        masm.setCallPosition(null);
+        return call;
     }
 
     protected Instruction lowerDivRem(IntegerDivRemNode n) {

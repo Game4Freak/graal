@@ -25,6 +25,7 @@
 
 package com.oracle.svm.hosted.webimage.wasm.gc;
 
+import com.oracle.svm.webimage.wasi.threads.WasiThreadStacks;
 import static jdk.graal.compiler.nodes.extended.BranchProbabilityNode.SLOW_PATH_PROBABILITY;
 import static jdk.graal.compiler.nodes.extended.BranchProbabilityNode.probability;
 
@@ -335,6 +336,15 @@ public class WasmLMGC implements GC {
     @NeverInline("Starts a stack walk in the caller frame")
     private void blackenStackRoots() {
         WebImageWasmStackWalker.walkCurrentThread(KnownIntrinsics.readCallerStackPointer(), blackenStackRootsVisitor);
+        // The stacks of the threads that are suspended (cooperative threads on WASI)
+        int current = WasiThreadStacks.current();
+        for (int slot = 0; slot < WasiThreadStacks.count(); slot++) {
+            long saved = WasiThreadStacks.savedStackPointer(slot);
+            if (slot != current && saved != 0) {
+                long base = WasiThreadStacks.base(slot);
+                WebImageWasmStackWalker.walkSuspendedThread(Word.pointer(saved), base == 0 ? MemoryLayout.getStackBase() : Word.pointer(base), blackenStackRootsVisitor);
+            }
+        }
     }
 
     /**

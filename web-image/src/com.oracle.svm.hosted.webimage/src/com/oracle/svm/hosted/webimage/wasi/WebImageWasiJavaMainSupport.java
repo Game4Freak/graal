@@ -24,6 +24,7 @@
  */
 package com.oracle.svm.hosted.webimage.wasi;
 
+import com.oracle.svm.webimage.wasi.threads.WasiThreads;
 import java.lang.reflect.Method;
 
 import org.graalvm.nativeimage.Platform;
@@ -65,7 +66,17 @@ public class WebImageWasiJavaMainSupport extends WebImageWasmLMJavaMainSupport {
      */
     public static int run() {
         WasiRuntime.markInitialized();
-        return finish(doRun(javaArguments(), JavaMainWrapper::invokeMain));
+        int exitCode = doRun(javaArguments(), JavaMainWrapper::invokeMain);
+        if (WasiThreads.enabled()) {
+            // Like the JVM, the program ends when the last thread that is not a daemon ends
+            WasiThreads.awaitNonDaemonThreads();
+            if (WasiThreads.hasLiveThreads()) {
+                // Daemon threads are suspended in the middle of their stacks and cannot return
+                WasiStdio.closeAll();
+                WasiExit.exitWithCode(exitCode);
+            }
+        }
+        return finish(exitCode);
     }
 
     /**

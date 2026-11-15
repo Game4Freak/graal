@@ -70,4 +70,137 @@ public class WasmCodeInfoHolder {
     public static void setCodeInfos(WasmCodeInfoQueryResult[] codeInfos) {
         WasmCodeInfoHolder.codeInfos = codeInfos;
     }
+
+    /*
+     * Tables indexed by the method indices in WasmCodeInfoQueryResult#getSourceFrames. They are
+     * parallel arrays of shared strings instead of StackTraceElement objects per IP to keep the
+     * image heap small.
+     */
+    @UnknownObjectField(availability = AfterCompilation.class) private static String[] sourceClassNames = new String[0];
+    @UnknownObjectField(availability = AfterCompilation.class) private static String[] sourceMethodNames = new String[0];
+    @UnknownObjectField(availability = AfterCompilation.class) private static String[] sourceFileNames = new String[0];
+    /** Whether the method only exists to create a throwable (and is left out of its stack trace). */
+    @UnknownObjectField(availability = AfterCompilation.class) private static boolean[] sourceHidden = new boolean[0];
+
+    /** The declaring classes of the methods, for {@link StackWalker}; an entry may be {@code null}. */
+    @UnknownObjectField(availability = AfterCompilation.class) private static Class<?>[] sourceClasses = new Class<?>[0];
+
+    @Platforms(Platform.HOSTED_ONLY.class)
+    public static void setSourceMethods(String[] classNames, String[] methodNames, String[] fileNames, boolean[] hidden, Class<?>[] classes) {
+        sourceClasses = classes;
+        sourceClassNames = classNames;
+        sourceMethodNames = methodNames;
+        sourceFileNames = fileNames;
+        sourceHidden = hidden;
+    }
+
+    /** A frame of {@link StackWalker}, decoded from the code information of an IP. */
+    private static final class Frame implements StackWalker.StackFrame {
+        private final StackTraceElement element;
+        private final Class<?> declaringClass;
+
+        Frame(StackTraceElement element, Class<?> declaringClass) {
+            this.element = element;
+            this.declaringClass = declaringClass;
+        }
+
+        @Override
+        public String getClassName() {
+            return element.getClassName();
+        }
+
+        @Override
+        public String getMethodName() {
+            return element.getMethodName();
+        }
+
+        @Override
+        public Class<?> getDeclaringClass() {
+            if (declaringClass == null) {
+                throw new UnsupportedOperationException("The declaring class of " + element + " is not available");
+            }
+            return declaringClass;
+        }
+
+        @Override
+        public int getByteCodeIndex() {
+            return -1;
+        }
+
+        @Override
+        public String getFileName() {
+            return element.getFileName();
+        }
+
+        @Override
+        public int getLineNumber() {
+            return element.getLineNumber();
+        }
+
+        @Override
+        public boolean isNativeMethod() {
+            return false;
+        }
+
+        @Override
+        public StackTraceElement toStackTraceElement() {
+            return element;
+        }
+
+        @Override
+        public String toString() {
+            return element.toString();
+        }
+    }
+
+    /**
+     * Turns the IPs of a stack walk (innermost frame first) into {@link StackWalker} frames,
+     * without the frames of the stack walking machinery itself.
+     */
+    public static java.util.List<StackWalker.StackFrame> toStackFrames(int[] ips) {
+        java.util.ArrayList<StackWalker.StackFrame> result = new java.util.ArrayList<>(ips.length);
+        boolean skipping = true;
+        for (int ip : ips) {
+            if (ip < 0 || ip >= codeInfos.length || codeInfos[ip] == null) {
+                continue;
+            }
+            int[] frames = codeInfos[ip].getSourceFrames();
+            for (int i = 0; i + 1 < frames.length; i += 2) {
+                int method = frames[i];
+                String className = sourceClassNames[method];
+                if (skipping && (sourceHidden[method] || className.startsWith("java.lang.StackWalker") || className.contains("Target_java_lang_StackWalker"))) {
+                    continue;
+                }
+                skipping = false;
+                result.add(new Frame(new StackTraceElement(className, sourceMethodNames[method], sourceFileNames[method], frames[i + 1]), sourceClasses[method]));
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Turns the IPs of a stack walk (innermost frame first) into stack trace elements.
+     *
+     * @param skipThrowableCreation leaves out the leading frames that create the throwable
+     *            ({@code fillInStackTrace} and the constructors of throwable classes)
+     */
+    public static StackTraceElement[] toStackTrace(int[] ips, boolean skipThrowableCreation) {
+        java.util.ArrayList<StackTraceElement> elements = new java.util.ArrayList<>(ips.length);
+        boolean skipping = skipThrowableCreation;
+        for (int ip : ips) {
+            if (ip < 0 || ip >= codeInfos.length || codeInfos[ip] == null) {
+                continue;
+            }
+            int[] frames = codeInfos[ip].getSourceFrames();
+            for (int i = 0; i + 1 < frames.length; i += 2) {
+                int method = frames[i];
+                if (skipping && sourceHidden[method]) {
+                    continue;
+                }
+                skipping = false;
+                elements.add(new StackTraceElement(sourceClassNames[method], sourceMethodNames[method], sourceFileNames[method], frames[i + 1]));
+            }
+        }
+        return elements.toArray(new StackTraceElement[0]);
+    }
 }

@@ -25,6 +25,7 @@
 
 package com.oracle.svm.hosted.webimage.wasm.stack;
 
+import com.oracle.svm.webimage.wasi.threads.WasiThreadStacks;
 import org.graalvm.nativeimage.CurrentIsolate;
 import org.graalvm.nativeimage.IsolateThread;
 import org.graalvm.nativeimage.StackValue;
@@ -61,7 +62,33 @@ public class WebImageWasmStackWalker {
          * Make sure we don't exceed the stack base. This is needed because the stack frames
          * currently can't tell if they are an entry point.
          */
-        walk.setEndSP(MemoryLayout.getStackBase());
+        walk.setEndSP(currentStackBase());
+    }
+
+    /**
+     * The address at which the stack of the running thread ends: the base of the stack laid out
+     * at build time, or the base of the stack allocated for a thread (see {@link WasiThreadStacks}).
+     */
+    @Uninterruptible(reason = "Called from uninterruptible code.", mayBeInlined = true)
+    public static Pointer currentStackBase() {
+        long base = WasiThreadStacks.base(WasiThreadStacks.current());
+        return base == 0 ? MemoryLayout.getStackBase() : Word.pointer(base);
+    }
+
+    /**
+     * Walks the stack of a suspended thread.
+     *
+     * @param startSP the stack pointer the thread saved when it was suspended
+     * @param endSP the base of the thread's stack
+     */
+    @Uninterruptible(reason = "Prevent deoptimization of stack frames while in this method.")
+    public static boolean walkSuspendedThread(Pointer startSP, Pointer endSP, WebImageWasmStackFrameVisitor visitor) {
+        CodePointer startIP = FrameAccess.singleton().readReturnAddress(CurrentIsolate.getCurrentThread(), startSP);
+        WebImageWasmStackWalk walk = StackValue.get(WebImageWasmStackWalk.class);
+        walk.setSP(startSP);
+        walk.setIP(startIP);
+        walk.setEndSP(endSP);
+        return doWalk(walk, CurrentIsolate.getCurrentThread(), visitor);
     }
 
     @Uninterruptible(reason = "Prevent deoptimization of stack frames while in this method.")

@@ -164,7 +164,7 @@ public final class WitBindgen {
         for (WorldItem item : world.exports.values()) {
             if (item instanceof InterfaceItem ii) {
                 Interface iface = model.interfaceOf(ii.id());
-                if (isWasi(iface)) {
+                if (isRuntimeWasi(iface)) {
                     continue;
                 }
                 exportedInterfaces.add(iface.id);
@@ -179,7 +179,7 @@ public final class WitBindgen {
         for (Map.Entry<String, WorldItem> e : world.imports.entrySet()) {
             if (e.getValue() instanceof InterfaceItem item) {
                 Interface iface = model.interfaceOf(item.id());
-                if (isWasi(iface) && !includeWasi) {
+                if (isRuntimeWasi(iface) && !includeWasi) {
                     continue;
                 }
                 generateImportedInterface(iface);
@@ -190,8 +190,8 @@ public final class WitBindgen {
         for (Map.Entry<String, WorldItem> e : world.exports.entrySet()) {
             if (e.getValue() instanceof InterfaceItem item) {
                 Interface iface = model.interfaceOf(item.id());
-                if (isWasi(iface)) {
-                    // Exported WASI interfaces (wasi:cli/run) are implemented by the runtime
+                if (isRuntimeWasi(iface)) {
+                    // Exported runtime interfaces (wasi:cli/run) are implemented by the runtime
                     continue;
                 }
                 generateExportedInterface(iface);
@@ -207,8 +207,19 @@ public final class WitBindgen {
         }
     }
 
-    private boolean isWasi(Interface iface) {
-        return iface.pkg >= 0 && model.packageOf(iface.pkg).namespace().equals("wasi");
+    /** The WASI packages that the Java runtime itself is built on (see {@code WasiWit}). */
+    private static final Set<String> RUNTIME_WASI_PACKAGES = Set.of("cli", "clocks", "random", "filesystem", "sockets");
+
+    /**
+     * Whether the interface belongs to a WASI package used by the Java runtime. Other WASI packages
+     * (for example {@code wasi:http}) are ordinary interfaces for which bindings are generated.
+     */
+    private boolean isRuntimeWasi(Interface iface) {
+        if (iface.pkg < 0) {
+            return false;
+        }
+        WitModel.Package pkg = model.packageOf(iface.pkg);
+        return pkg.namespace().equals("wasi") && RUNTIME_WASI_PACKAGES.contains(pkg.packageName());
     }
 
     // Types

@@ -24,6 +24,13 @@
  */
 package com.oracle.svm.hosted.webimage.wasi;
 
+import com.oracle.svm.shared.util.ReflectionUtil;
+import com.oracle.svm.core.meta.MethodPointer;
+import com.oracle.svm.core.FunctionPointerHolder;
+import com.oracle.svm.webimage.wasi.threads.WasiThreads;
+import com.oracle.svm.webimage.JSExceptionSupport;
+import com.oracle.svm.webimage.wasm.stack.WasmStackTraceSupport;
+import com.oracle.svm.hosted.webimage.wasm.stack.WasmLMStackTraceSupport;
 import org.graalvm.nativeimage.ImageSingletons;
 import org.graalvm.nativeimage.Platforms;
 
@@ -48,6 +55,10 @@ public class WebImageWasiFeature implements InternalFeature {
     @Override
     public void afterRegistration(AfterRegistrationAccess access) {
         ImageSingletons.add(WasiAllocator.class, new WasiRealloc.Allocator());
+        if (!JSExceptionSupport.Options.DisableStackTraces.getValue()) {
+            // No host to ask for a stack trace: walk the shadow stack instead
+            ImageSingletons.add(WasmStackTraceSupport.class, new WasmLMStackTraceSupport());
+        }
     }
 
     @Override
@@ -58,6 +69,16 @@ public class WebImageWasiFeature implements InternalFeature {
     @Override
     public void beforeAnalysis(BeforeAnalysisAccess a) {
         BeforeAnalysisAccessImpl access = (BeforeAnalysisAccessImpl) a;
+        if (WasiThreads.enabled()) {
+            /*
+             * New threads start in WasiThreads.threadEntry, which the host calls through the
+             * function table: the method is a root and its table index is kept in the image heap.
+             */
+            AnalysisMethod threadEntry = (AnalysisMethod) access.getMetaAccess().lookupJavaMethod(ReflectionUtil.lookupMethod(WasiThreads.class, "threadEntry", int.class));
+            access.registerAsRoot(threadEntry, true, "Start function of threads, registered in " + WebImageWasiFeature.class);
+            WasiThreads.setEntryPoint(new FunctionPointerHolder(new MethodPointer(threadEntry)));
+        }
+        access.registerAsRoot((AnalysisMethod) WasmStackTraceSupport.CAPTURE.findMethod(access.getMetaAccess()), true, "Called when a throwable is created, registered in " + WebImageWasiFeature.class);
         for (SnippetRuntime.SubstrateForeignCallDescriptor descriptor : WasiMath.FOREIGN_CALLS) {
             access.registerAsRoot((AnalysisMethod) descriptor.findMethod(access.getMetaAccess()), true, "Calls to this method are created during lowering, registered in " + WebImageWasiFeature.class);
         }
@@ -66,5 +87,6 @@ public class WebImageWasiFeature implements InternalFeature {
     @Override
     public void registerForeignCalls(SubstrateForeignCallsProvider foreignCalls) {
         foreignCalls.register(WasiMath.FOREIGN_CALLS);
+        foreignCalls.register(WasmStackTraceSupport.CAPTURE);
     }
 }

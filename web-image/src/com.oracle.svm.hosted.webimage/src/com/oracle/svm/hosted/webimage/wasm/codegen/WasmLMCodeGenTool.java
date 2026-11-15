@@ -41,6 +41,7 @@ import com.oracle.svm.webimage.hightiercodegen.variables.VariableAllocation;
 import com.oracle.svm.webimage.wasm.stack.WebImageWasmFrameMap;
 import com.oracle.svm.webimage.wasm.types.WasmPrimitiveType;
 
+import jdk.graal.compiler.graph.Node;
 import jdk.graal.compiler.core.common.LIRKind;
 import jdk.graal.compiler.core.common.type.AbstractObjectStamp;
 import jdk.graal.compiler.debug.GraalError;
@@ -80,6 +81,42 @@ public class WasmLMCodeGenTool extends WasmCodeGenTool {
      */
     private final EconomicSet<ValueNode> spilledNodes = EconomicSet.create(16);
 
+    /** Bytecode position of the node whose call is generated next, see {@link #setCallPosition}. */
+    private jdk.vm.ci.code.BytecodePosition pendingCallPosition;
+
+    /**
+     * Sets the bytecode position for the next call generated with {@link #getCall}. It ends up in
+     * the code information of the call's instruction pointer and from there in stack traces.
+     */
+    @Override
+    public void setCallPosition(Node node) {
+        pendingCallPosition = positionOf(node);
+    }
+
+    private static jdk.vm.ci.code.BytecodePosition positionOf(Node node) {
+        if (node == null) {
+            return null;
+        }
+        if (node.getNodeSourcePosition() != null) {
+            return node.getNodeSourcePosition();
+        }
+        if (node instanceof jdk.graal.compiler.nodes.Invoke invoke && invoke.stateAfter() != null && invoke.stateAfter().getMethod() != null) {
+            jdk.graal.compiler.nodes.FrameState state = invoke.stateAfter();
+            return new jdk.vm.ci.code.BytecodePosition(outerPosition(state.outerFrameState()), state.getMethod(), invoke.bci());
+        }
+        if (node instanceof jdk.graal.compiler.nodes.StateSplit split && split.stateAfter() != null && split.stateAfter().getMethod() != null) {
+            return outerPosition(split.stateAfter());
+        }
+        return null;
+    }
+
+    private static jdk.vm.ci.code.BytecodePosition outerPosition(jdk.graal.compiler.nodes.FrameState state) {
+        if (state == null || state.getMethod() == null) {
+            return null;
+        }
+        return new jdk.vm.ci.code.BytecodePosition(outerPosition(state.outerFrameState()), state.getMethod(), state.bci);
+    }
+
     protected WasmLMCodeGenTool(CoreProviders provider, VariableAllocation variableAllocation, WebImageWasmCompilationResult compilationResult, WebImageWasmProviders wasmProviders,
                     WasmBlockContext topContext, FrameMapBuilderTool frameMapBuilder, StructuredGraph graph) {
         super(provider, variableAllocation, compilationResult, wasmProviders, topContext, graph);
@@ -105,6 +142,10 @@ public class WasmLMCodeGenTool extends WasmCodeGenTool {
         }
 
         recordCall(posBefore, posAfter, target, direct);
+        if (pendingCallPosition != null) {
+            compilationResult.recordCallPosition(posAfter, pendingCallPosition);
+            pendingCallPosition = null;
+        }
         genIPSetter();
         return callInstruction;
     }

@@ -97,6 +97,11 @@ public class JSExceptionSupport {
             s.println(prefix + "\tStacktraces have been disabled in this image");
         } else if (backtrace == null) {
             s.println(prefix + "\tThis exception does not have a stacktrace, this is a bug!");
+        } else if (backtrace instanceof int[]) {
+            // Pseudo instruction pointers captured from the shadow stack (see WasmStackTraceSupport)
+            for (StackTraceElement element : com.oracle.svm.webimage.wasm.stack.WasmStackTraceSupport.toStackTrace(backtrace, true)) {
+                s.println(prefix + "\tat " + element);
+            }
         } else {
             /*
              * If the backtrace object is already a string, use it as-is, otherwise call JS code to

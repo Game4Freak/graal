@@ -70,4 +70,62 @@ public final class WasiWit {
         }
         return witDir;
     }
+
+    /** A WIT directory and the world to select in it. */
+    public record WitSelection(Path directory, String world) {
+    }
+
+    /**
+     * Prepares a user-provided WIT tree for {@code wasm-tools component embed}.
+     * <p>
+     * The Java runtime imports the interfaces of {@code wasi:cli/imports}, so the embedded world
+     * must contain them. A world that is given by its qualified name ({@code ns:pkg/world}) does
+     * not have to include them itself: the tree is copied, the bundled WASI packages are added if
+     * the tree does not provide {@code wasi:cli}, and a synthetic world that includes both the
+     * user's world and {@code wasi:cli/imports} is selected instead. Imports that the image does
+     * not use are pruned by {@code wasm-tools}.
+     * <p>
+     * An unqualified world name refers to the root package of the tree and is used as is.
+     */
+    public static WitSelection prepareUserWit(Path userWit, String userWorld, Path targetDir) {
+        if (userWorld.indexOf(':') < 0 || !Files.isDirectory(userWit)) {
+            return new WitSelection(userWit, userWorld);
+        }
+        Path witDir = targetDir.resolve("user-wit");
+        try {
+            boolean[] hasCli = {false};
+            try (java.util.stream.Stream<Path> files = Files.walk(userWit)) {
+                for (Path source : (Iterable<Path>) files::iterator) {
+                    Path target = witDir.resolve(userWit.relativize(source).toString());
+                    if (Files.isDirectory(source)) {
+                        Files.createDirectories(target);
+                    } else {
+                        Files.copy(source, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                        if (source.toString().endsWith(".wit") && Files.readString(source).contains("package wasi:cli@")) {
+                            hasCli[0] = true;
+                        }
+                    }
+                }
+            }
+            if (!hasCli[0]) {
+                for (String file : FILES) {
+                    if (!file.startsWith("deps/")) {
+                        continue;
+                    }
+                    Path target = witDir.resolve("deps").resolve("graalvm-" + file.substring("deps/".length()));
+                    Files.createDirectories(target.getParent());
+                    try (InputStream stream = WasiWit.class.getResourceAsStream("wit/" + file)) {
+                        VMError.guarantee(stream != null, "Couldn't find bundled WIT file %s", file);
+                        Files.copy(stream, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }
+                }
+            }
+            Path synthetic = witDir.resolve("deps").resolve("graalvm-webimage-component").resolve("world.wit");
+            Files.createDirectories(synthetic.getParent());
+            Files.writeString(synthetic, "package graalvm:webimage-component;\n\nworld component {\n    include " + userWorld + ";\n    include wasi:cli/imports@" + WASI_VERSION + ";\n}\n");
+        } catch (IOException e) {
+            throw VMError.shouldNotReachHere("Failed to prepare the WIT directory " + userWit, e);
+        }
+        return new WitSelection(witDir, "graalvm:webimage-component/component");
+    }
 }

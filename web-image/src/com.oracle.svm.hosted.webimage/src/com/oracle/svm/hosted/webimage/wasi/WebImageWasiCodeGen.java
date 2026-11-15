@@ -24,6 +24,8 @@
  */
 package com.oracle.svm.hosted.webimage.wasi;
 
+import com.oracle.svm.hosted.webimage.wasm.ast.Export;
+import com.oracle.svm.webimage.wasi.threads.WasiThreads;
 import static com.oracle.svm.hosted.webimage.metrickeys.ImageBreakdownMetricKeys.ENTIRE_IMAGE_SIZE;
 import static com.oracle.svm.hosted.webimage.metrickeys.ImageBreakdownMetricKeys.WASM_IMAGE_SIZE;
 
@@ -95,6 +97,15 @@ public class WebImageWasiCodeGen extends WebImageWasmLMCodeGen {
     }
 
     @Override
+    protected void genWasmModule() {
+        super.genWasmModule();
+        if (WasiThreads.enabled()) {
+            // thread.new-indirect takes the start function of a thread from this table
+            module.addExport(new Export(Export.Type.TABLE, getProviders().knownIds().functionTable, "__indirect_function_table", "Function table, for thread.new-indirect"));
+        }
+    }
+
+    @Override
     @SuppressWarnings("try")
     protected void emitJSCode() {
         /*
@@ -118,7 +129,9 @@ public class WebImageWasiCodeGen extends WebImageWasmLMCodeGen {
             witPath = Path.of(userWit);
             UserError.guarantee(Files.exists(witPath), "The WIT path %s does not exist", witPath);
             UserError.guarantee(userWorld != null, "A world must be selected with %s when a WIT directory is given", SubstrateOptionsParser.commandArgument(WebImageWasiOptions.WitWorld, "<world>"));
-            world = userWorld;
+            WasiWit.WitSelection selection = WasiWit.prepareUserWit(witPath, userWorld, tempDir);
+            witPath = selection.directory();
+            world = selection.world();
         } else {
             witPath = WasiWit.extract(tempDir);
             world = userWorld != null ? userWorld : WasiWit.COMMAND_WORLD;

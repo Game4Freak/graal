@@ -101,6 +101,13 @@ public class WebImageWasmCodeCache extends WebImageCodeCache {
         codeInfoMap.forEach((ip, info) -> codeInfos[ip] = info);
         // Inject the code infos into the image
         WasmCodeInfoHolder.setCodeInfos(codeInfos);
+        int methods = sourceMethodIds.size();
+        boolean[] hidden = new boolean[methods];
+        for (int i = 0; i < methods; i++) {
+            hidden[i] = sourceHidden.get(i);
+        }
+        WasmCodeInfoHolder.setSourceMethods(sourceClassNames.toArray(new String[0]), sourceMethodNames.toArray(new String[0]), sourceFileNames.toArray(new String[0]), hidden,
+                        sourceClasses.toArray(new Class<?>[0]));
     }
 
     @Override
@@ -119,10 +126,13 @@ public class WebImageWasmCodeCache extends WebImageCodeCache {
 
         FrameData data = new FrameData(compilation.getTotalFrameSize(), method.format("%H.%n(%P)%R"));
 
-        WasmCodeInfoQueryResult queryResult = new WasmCodeInfoQueryResult(data, compilation.getLiveSlots().stream().mapToInt(s -> s.getOffset(compilation.getTotalFrameSize())).toArray());
+        int[] referenceOffsets = compilation.getLiveSlots().stream().mapToInt(s -> s.getOffset(compilation.getTotalFrameSize())).toArray();
+        WasmCodeInfoQueryResult queryResult = new WasmCodeInfoQueryResult(data, referenceOffsets, sourceFrames(method, null));
 
         // Add code info for start of method
         codeInfoMap.put(compilationOffset, queryResult);
+        // Call sites of the method with the same source frames share one result object
+        java.util.IdentityHashMap<int[], WasmCodeInfoQueryResult> perCallSite = new java.util.IdentityHashMap<>();
 
         for (Infopoint infopoint : compilation.getInfopoints()) {
             if (infopoint instanceof Call call) {
@@ -134,9 +144,79 @@ public class WebImageWasmCodeCache extends WebImageCodeCache {
 
                 int ip = compilationOffset + offset;
 
-                codeInfoMap.put(ip, queryResult);
+                // The frame layout is the method's; the source frames are those of the call site
+                int[] frames = sourceFrames(method, compilation.getCallPosition(offset));
+                WasmCodeInfoQueryResult callResult = frames == queryResult.getSourceFrames() ? queryResult : perCallSite.computeIfAbsent(frames, f -> new WasmCodeInfoQueryResult(data, referenceOffsets, f));
+                codeInfoMap.put(ip, callResult);
             }
         }
+    }
+
+    /*
+     * Tables for stack traces: every method that appears in a source frame gets an index into
+     * parallel lists of its class, method and file name.
+     */
+    private final Map<jdk.vm.ci.meta.ResolvedJavaMethod, Integer> sourceMethodIds = new java.util.HashMap<>();
+    private final java.util.List<String> sourceClassNames = new java.util.ArrayList<>();
+    private final java.util.List<String> sourceMethodNames = new java.util.ArrayList<>();
+    private final java.util.List<String> sourceFileNames = new java.util.ArrayList<>();
+    private final java.util.List<Boolean> sourceHidden = new java.util.ArrayList<>();
+    private final java.util.List<Class<?>> sourceClasses = new java.util.ArrayList<>();
+    private static final int[] NO_SOURCE_FRAMES = new int[0];
+    private final Map<java.util.List<Integer>, int[]> canonicalSourceFrames = new java.util.HashMap<>();
+
+    /**
+     * Encodes the Java frames of an IP as pairs of method index and line number, innermost first.
+     * Without a bytecode position, the only frame is the compiled method with an unknown line.
+     */
+    private int[] sourceFrames(HostedMethod method, jdk.vm.ci.code.BytecodePosition position) {
+        if (!com.oracle.svm.webimage.wasm.stack.WasmStackTraceSupport.isAvailable()) {
+            // Nobody decodes stack traces in this image
+            return NO_SOURCE_FRAMES;
+        }
+        java.util.List<Integer> frames = new java.util.ArrayList<>();
+        if (position == null) {
+            frames.add(sourceMethodId(method));
+            frames.add(-1);
+        }
+        for (jdk.vm.ci.code.BytecodePosition p = position; p != null; p = p.getCaller()) {
+            frames.add(sourceMethodId(p.getMethod()));
+            frames.add(p.getMethod().asStackTraceElement(p.getBCI()).getLineNumber());
+        }
+        // Many call sites have the same frames (same line, same inlining): one array for all of them
+        return canonicalSourceFrames.computeIfAbsent(frames, f -> f.stream().mapToInt(Integer::intValue).toArray());
+    }
+
+    private int sourceMethodId(jdk.vm.ci.meta.ResolvedJavaMethod method) {
+        Integer id = sourceMethodIds.get(method);
+        if (id == null) {
+            id = sourceMethodIds.size();
+            sourceMethodIds.put(method, id);
+            StackTraceElement element = method.asStackTraceElement(0);
+            sourceClassNames.add(element.getClassName().intern());
+            sourceMethodNames.add(element.getMethodName().intern());
+            sourceFileNames.add(element.getFileName() == null ? null : element.getFileName().intern());
+            sourceHidden.add(createsThrowable(method));
+            // Only classes the analysis has seen have a class object in the image
+            sourceClasses.add(method.getDeclaringClass() instanceof com.oracle.svm.hosted.meta.HostedType type && type.getWrapped().isReachable() ? type.getJavaClass() : null);
+        }
+        return id;
+    }
+
+    /** Frames of {@code fillInStackTrace} and of throwable constructors are not part of a stack trace. */
+    private static boolean createsThrowable(jdk.vm.ci.meta.ResolvedJavaMethod method) {
+        boolean throwable = false;
+        for (jdk.vm.ci.meta.ResolvedJavaType type = method.getDeclaringClass(); type != null; type = type.getSuperclass()) {
+            if (type.toJavaName().equals("java.lang.Throwable")) {
+                throwable = true;
+                break;
+            }
+        }
+        if (method.getDeclaringClass().toJavaName().equals(com.oracle.svm.webimage.wasm.stack.WasmStackTraceSupport.class.getName())) {
+            // The capturing code itself
+            return true;
+        }
+        return throwable && (method.getName().equals("<init>") || method.getName().startsWith("fillInStackTrace"));
     }
 
     private static int computeNextMethodStart(int current, int addend) {

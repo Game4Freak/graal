@@ -490,6 +490,14 @@ public final class WitModel {
         int slash = qualified.lastIndexOf('/');
         String worldName = slash >= 0 ? qualified.substring(slash + 1) : qualified;
         String pkgName = slash >= 0 ? qualified.substring(0, slash) : null;
+        // Accept the fully qualified form "namespace:package/world@version" as well
+        int at = worldName.indexOf('@');
+        if (at >= 0) {
+            if (pkgName != null) {
+                pkgName += worldName.substring(at);
+            }
+            worldName = worldName.substring(0, at);
+        }
         for (World world : worlds) {
             if (!world.name.equals(worldName)) {
                 continue;

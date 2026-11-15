@@ -47,10 +47,14 @@ import org.graalvm.nativeimage.Platforms;
 import org.graalvm.nativeimage.ProcessProperties;
 
 import com.oracle.svm.core.OS;
+import com.oracle.svm.core.annotate.Alias;
 import com.oracle.svm.core.annotate.AnnotateOriginal;
 import com.oracle.svm.core.annotate.Delete;
+import com.oracle.svm.core.annotate.Inject;
+import com.oracle.svm.core.annotate.RecomputeFieldValue;
 import com.oracle.svm.core.annotate.Substitute;
 import com.oracle.svm.core.annotate.TargetClass;
+import com.oracle.svm.webimage.wasi.threads.WasiThreads;
 import com.oracle.svm.core.jdk.Resources;
 import com.oracle.svm.core.jdk.resources.NativeImageResourceFileSystem;
 import com.oracle.svm.core.jdk.resources.ResourceStorageEntryBase;
@@ -180,11 +184,19 @@ final class Target_sun_misc_Unsafe_Web {
 
     @Substitute
     public void unpark(Object o) {
+        if (WasiThreads.enabled()) {
+            WasiThreads.unpark((Thread) o);
+            return;
+        }
         throw VMError.unimplemented("Unsafe.unpark");
     }
 
     @Substitute
     public void park(boolean b0, long l1) {
+        if (WasiThreads.enabled()) {
+            WasiThreads.park(b0, l1);
+            return;
+        }
         throw VMError.unimplemented("Unsafe.park");
     }
 
@@ -198,6 +210,11 @@ final class Target_sun_misc_Unsafe_Web {
 @SuppressWarnings({"static-method", "unused"})
 final class Target_java_lang_Thread_Web {
 
+    /** Scheduling state of the thread on WASI (a {@code WasiThreads.Fiber}). */
+    @Inject @RecomputeFieldValue(kind = RecomputeFieldValue.Kind.Reset) Object wasiFiber;
+
+    @Alias long tid;
+
     @Substitute
     void setPriority(int newPriority) {
     }
@@ -208,24 +225,48 @@ final class Target_java_lang_Thread_Web {
 
     @Substitute
     private void start0() {
+        if (WasiThreads.enabled()) {
+            // The requested stack size is not kept in a place that is reachable here
+            WasiThreads.start(SubstrateUtil.cast(this, Thread.class), 0);
+        }
     }
 
     @Substitute
     private long getId() {
+        if (WasiThreads.enabled()) {
+            return tid;
+        }
         return 1;
     }
 
     @Substitute
     private Thread.State getState() {
+        if (WasiThreads.enabled()) {
+            return WasiThreads.getState(SubstrateUtil.cast(this, Thread.class));
+        }
         return Thread.State.RUNNABLE;
     }
 
     @Substitute
     private void interrupt() {
+        if (WasiThreads.enabled()) {
+            WasiThreads.interrupt(SubstrateUtil.cast(this, Thread.class));
+        }
     }
 
     @Substitute
     private boolean isInterrupted() {
+        if (WasiThreads.enabled()) {
+            return WasiThreads.isInterrupted(SubstrateUtil.cast(this, Thread.class), false);
+        }
+        return false;
+    }
+
+    @Substitute
+    boolean getAndClearInterrupt() {
+        if (WasiThreads.enabled()) {
+            return WasiThreads.isInterrupted(SubstrateUtil.cast(this, Thread.class), true);
+        }
         return false;
     }
 
@@ -237,24 +278,34 @@ final class Target_java_lang_Thread_Web {
      */
     @Substitute
     private boolean isAlive() {
+        if (WasiThreads.enabled()) {
+            return WasiThreads.isAlive(SubstrateUtil.cast(this, Thread.class));
+        }
         // TODO GR-42163. Update this once threading is supported
         return SubstrateUtil.cast(this, Thread.class) == Thread.currentThread();
     }
 
     @Substitute
     private static void yield() {
+        if (WasiThreads.enabled()) {
+            WasiThreads.yieldCurrent();
+        }
     }
 
     @Substitute
-    private static void sleep(long millis) {
-        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+    private static void sleep(long millis) throws InterruptedException {
+        if (WasiThreads.enabled()) {
+            WasiThreads.sleep(millis * 1_000_000L);
+        } else if (Platform.includedIn(WebImageWasiPlatform.class)) {
             WasiClocks.sleepNanos(millis * 1_000_000L);
         }
     }
 
     @Substitute
-    private static void sleepNanos0(long nanos) {
-        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+    private static void sleepNanos0(long nanos) throws InterruptedException {
+        if (WasiThreads.enabled()) {
+            WasiThreads.sleep(nanos);
+        } else if (Platform.includedIn(WebImageWasiPlatform.class)) {
             WasiClocks.sleepNanos(nanos);
         }
     }
@@ -271,6 +322,9 @@ final class Target_java_lang_Thread_Web {
 
     @Substitute
     public StackTraceElement[] getStackTrace() {
+        if (com.oracle.svm.webimage.wasm.stack.WasmStackTraceSupport.isAvailable()) {
+            return com.oracle.svm.webimage.wasm.stack.WasmStackTraceSupport.toStackTrace(com.oracle.svm.webimage.wasm.stack.WasmStackTraceSupport.captureBacktrace(), true);
+        }
         return new StackTraceElement[0];
     }
 
@@ -312,6 +366,16 @@ final class Target_java_lang_System_Web {
 
     @Substitute
     private static void exit(int status) {
+        if (Platform.includedIn(WebImageWasiPlatform.class)) {
+            /*
+             * The host ends the program right here. Unwinding to the entry point with an exception,
+             * as the JavaScript hosts do, does not get past callers that catch Throwable.
+             */
+            System.out.flush();
+            System.err.flush();
+            com.oracle.svm.webimage.wasi.WasiStdio.closeAll();
+            com.oracle.svm.webimage.wasi.WasiExit.exitWithCode(status);
+        }
         JSFunctionIntrinsics.exit(status);
     }
 
@@ -620,6 +684,31 @@ final class Target_jdk_internal_reflect_Reflection_Web {
      */
     @Substitute
     public static Class<?> getCallerClass() {
+        if (com.oracle.svm.webimage.wasm.stack.WasmStackTraceSupport.isAvailable()) {
+            /*
+             * After the frame of this method comes the caller-sensitive method that asks, then
+             * its caller. Frames of the reflection machinery in between do not count.
+             */
+            boolean passedThisMethod = false;
+            int seen = 0;
+            for (StackWalker.StackFrame frame : com.oracle.svm.webimage.wasm.stack.WasmStackTraceSupport.captureFrames()) {
+                if (!passedThisMethod) {
+                    passedThisMethod = frame.getMethodName().equals("getCallerClass");
+                    continue;
+                }
+                String name = frame.getClassName();
+                if (name.startsWith("java.lang.reflect.") || name.startsWith("jdk.internal.reflect.") || name.startsWith("java.lang.invoke.")) {
+                    continue;
+                }
+                if (seen++ == 1) {
+                    try {
+                        return frame.getDeclaringClass();
+                    } catch (UnsupportedOperationException e) {
+                        return null;
+                    }
+                }
+            }
+        }
         return null;
     }
 }
@@ -912,7 +1001,7 @@ final class Target_java_util_zip_CRC32_Web {
     }
 }
 
-@TargetClass(value = java.util.logging.Logger.class)
+@TargetClass(value = java.util.logging.Logger.class, onlyWith = com.oracle.svm.webimage.WebImageLoggingSupport.LoggerLookupReplaced.class)
 @SuppressWarnings("unused")
 final class Target_java_util_logging_Logger_Web {
     @Substitute
@@ -941,6 +1030,23 @@ final class Target_java_lang_ProcessHandleImpl_Web {
             return 0L;
         }
         return -1L;
+    }
+}
+
+@TargetClass(className = "java.lang.ProcessHandleImpl", innerClass = "Info")
+@SuppressWarnings("unused")
+final class Target_java_lang_ProcessHandleImpl_Info_Web {
+
+    @Substitute
+    private static void initIDs() {
+        // The native code only caches field ids
+    }
+
+    /**
+     * Nothing is known about the process: command, arguments, user and times stay empty.
+     */
+    @Substitute
+    private void info0(long pid) {
     }
 }
 

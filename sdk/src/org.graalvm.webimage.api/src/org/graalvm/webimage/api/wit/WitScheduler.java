@@ -272,6 +272,58 @@ public final class WitScheduler {
     }
 
     /**
+     * Whether a host operation is pending whose event code that blocks now could wait for: one of
+     * the running callback-lifted task, or one started outside of tasks.
+     */
+    public static boolean hasPendingRootWork() {
+        return hasPendingWork(currentTask) || hasPendingWork(-1);
+    }
+
+    /**
+     * Called by a runtime that has nothing to run (all threads are blocked): handles the next
+     * event of a pending host operation of the running task or, if it has none, of the operations
+     * started outside of tasks.
+     *
+     * @param block whether to wait for an event if none has been delivered yet
+     * @return false if no event was handled (without blocking: none was delivered; with blocking:
+     *         no operation is pending, so waiting would never end)
+     */
+    public static boolean idle(boolean block) {
+        int context;
+        if (hasPendingWork(currentTask)) {
+            context = currentTask;
+        } else if (hasPendingWork(-1)) {
+            context = -1;
+        } else {
+            return false;
+        }
+        int previous = currentTask;
+        currentTask = context;
+        try {
+            int buffer = eventBuffer();
+            int code = block ? waitableSetWait(currentSet(), buffer) : waitableSetPoll(currentSet(), buffer);
+            return dispatch(code, WitMemory.readInt(buffer), WitMemory.readInt(buffer + Integer.BYTES));
+        } finally {
+            currentTask = previous;
+        }
+    }
+
+    /**
+     * Called when the host calls an export or a callback. A runtime with threads replaces this
+     * to adopt the thread the host made the call on.
+     */
+    private static void enteredFromHost() {
+    }
+
+    /**
+     * Called before an export or a callback returns to the host. A runtime with threads replaces
+     * this to let the other threads run as far as they can: they do not run while the component
+     * is not executing.
+     */
+    private static void returningToHost() {
+    }
+
+    /**
      * Dispatches already delivered events without blocking.
      */
     public static void poll() {
@@ -415,6 +467,7 @@ public final class WitScheduler {
      * @return the task slot, to be passed to {@link #startTask}
      */
     public static int beginTask() {
+        enteredFromHost();
         Task<?> task = new Task<>();
         int slot = TASKS.indexOf(null);
         if (slot < 0) {
@@ -446,6 +499,7 @@ public final class WitScheduler {
     }
 
     private static int settle(int slot, Task<?> task) {
+        returningToHost();
         if (task.finishIfDone() && !hasPendingWork(slot)) {
             task.dropSet();
             TASKS.set(slot, null);
@@ -462,6 +516,7 @@ public final class WitScheduler {
      * @return the callback code to return from the callback
      */
     public static int callback(int code, int waitable, int payload, Runnable taskCancel) {
+        enteredFromHost();
         int slot = contextGet();
         Task<?> task = TASKS.get(slot);
         if (code == EVENT_TASK_CANCELLED) {

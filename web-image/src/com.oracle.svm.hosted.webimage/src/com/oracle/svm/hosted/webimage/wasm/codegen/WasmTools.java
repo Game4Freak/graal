@@ -183,7 +183,7 @@ public class WasmTools {
      * @param component Path for the resulting component
      */
     public void componentize(Path witPath, String world, Path coreModule, Path embedded, Path component, OptionValues options, Consumer<String> printer) {
-        runChecked(List.of("component", "embed", "--world", world, witPath.toString(), coreModule.toString(), "-o", embedded.toString()), options, printer);
+        runChecked(List.of("component", "embed", "--all-features", "--world", world, witPath.toString(), coreModule.toString(), "-o", embedded.toString()), options, printer);
         runChecked(List.of("component", "new", embedded.toString(), "-o", component.toString()), options, printer);
     }
 
